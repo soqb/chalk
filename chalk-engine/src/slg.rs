@@ -204,8 +204,8 @@ impl<I: Interner> MayInvalidate<I> {
             ) => self.aggregate_name_and_substs(id_a, substitution_a, id_b, substitution_b),
             (TyKind::Scalar(scalar_a), TyKind::Scalar(scalar_b)) => scalar_a != scalar_b,
             (TyKind::Str, TyKind::Str) => false,
-            (TyKind::Tuple(arity_a, substitution_a), TyKind::Tuple(arity_b, substitution_b)) => {
-                self.aggregate_name_and_substs(arity_a, substitution_a, arity_b, substitution_b)
+            (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => {
+                self.aggregate_tuples(*arity_a, contents_a, *arity_b, contents_b)
             }
             (
                 TyKind::OpaqueType(id_a, substitution_a),
@@ -374,5 +374,49 @@ impl<I: Interner> MayInvalidate<I> {
             .iter(interner)
             .zip(current_substitution.iter(interner))
             .any(|(new, current)| self.aggregate_generic_args(new, current))
+    }
+
+    fn aggregate_tuples(
+        &mut self,
+        new_arity: TupleArity,
+        new_contents: &TupleContents<I>,
+        current_arity: TupleArity,
+        current_contents: &TupleContents<I>,
+    ) -> bool {
+        // FIXME(soqb): i am doing thios blindly i have no idea what's going on.
+        let interner = self.interner;
+        if new_arity != current_arity {
+            return true;
+        }
+
+        assert_eq!(
+            new_contents.len(interner),
+            current_contents.len(interner),
+            "does {:?} take {} substitution or {}? can't both be right",
+            new_arity,
+            new_contents.len(interner),
+            current_contents.len(interner)
+        );
+
+        for (i, (a, b)) in new_contents
+            .iter(interner)
+            .zip(new_contents.iter(interner))
+            .enumerate()
+        {
+            assert_eq!(
+                a.is_unpacked(interner),
+                b.is_unpacked(interner),
+                "element {} of {:?} encapsulates a mismatch",
+                i,
+                new_arity,
+            );
+        }
+
+        new_contents
+            .iter(interner)
+            .zip(current_contents.iter(interner))
+            .any(|(new, current)| {
+                self.aggregate_tys(new.ty_any(interner), current.ty_any(interner))
+            })
     }
 }

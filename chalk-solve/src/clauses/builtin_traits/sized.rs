@@ -4,7 +4,8 @@ use crate::clauses::builtin_traits::needs_impl_for_tys;
 use crate::clauses::ClauseBuilder;
 use crate::{Interner, RustIrDatabase, TraitRef};
 use chalk_ir::{
-    AdtId, CanonicalVarKinds, Floundered, Substitution, TyKind, TyVariableKind, VariableKind,
+    AdtId, CanonicalVarKinds, Floundered, Substitution, TupleArity, TupleContents, TyKind,
+    TyVariableKind, VariableKind,
 };
 
 use super::last_field_of_struct;
@@ -25,11 +26,11 @@ fn push_tuple_sized_conditions<I: Interner>(
     db: &dyn RustIrDatabase<I>,
     builder: &mut ClauseBuilder<'_, I>,
     trait_ref: TraitRef<I>,
-    arity: usize,
-    substitution: &Substitution<I>,
+    arity: TupleArity,
+    contents: &TupleContents<I>,
 ) {
     // Empty tuples are always Sized
-    if arity == 0 {
+    if arity.is_empty() {
         builder.push_fact(trait_ref);
         return;
     }
@@ -38,12 +39,11 @@ fn push_tuple_sized_conditions<I: Interner>(
 
     // To check if a tuple is Sized, we only have to look at its last element.
     // This is because the WF checks for tuples require that all the other elements must be Sized.
-    let last_elem_ty = substitution
+    let last_elem_ty = contents
         .iter(interner)
         .last()
         .unwrap()
-        .ty(interner)
-        .unwrap()
+        .ty_any(interner)
         .clone();
 
     needs_impl_for_tys(db, builder, trait_ref, iter::once(last_elem_ty));

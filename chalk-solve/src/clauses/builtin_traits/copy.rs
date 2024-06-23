@@ -2,7 +2,7 @@ use crate::clauses::builtin_traits::needs_impl_for_tys;
 use crate::clauses::ClauseBuilder;
 use crate::{Interner, RustIrDatabase, TraitRef};
 use chalk_ir::{
-    CanonicalVarKinds, Floundered, TupleContents, TyKind, TyVariableKind, VariableKind,
+    CanonicalVarKinds, Floundered, TupleArity, TupleContents, TyKind, TyVariableKind, VariableKind,
 };
 use std::iter;
 use tracing::instrument;
@@ -11,11 +11,11 @@ fn push_tuple_copy_conditions<I: Interner>(
     db: &dyn RustIrDatabase<I>,
     builder: &mut ClauseBuilder<'_, I>,
     trait_ref: TraitRef<I>,
-    arity: usize,
-    substitution: &TupleContents<I>,
+    arity: TupleArity,
+    contents: &TupleContents<I>,
 ) {
     // Empty tuples are always Copy
-    if arity == 0 {
+    if arity.is_empty() {
         builder.push_fact(trait_ref);
         return;
     }
@@ -26,7 +26,7 @@ fn push_tuple_copy_conditions<I: Interner>(
         db,
         builder,
         trait_ref,
-        substitution
+        contents
             .iter(interner)
             .map(|elem| elem.ty_any(interner).clone()),
     );

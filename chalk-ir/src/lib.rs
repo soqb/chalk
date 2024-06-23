@@ -298,6 +298,86 @@ pub enum Mutability {
     Not,
 }
 
+/// The length ("arity") of a tuple.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TupleArity {
+    /// The tuple has exactly this length.
+    Exact(usize),
+    /// The tuple has a minimum length, but no fixed length.
+    Inexact {
+        /// The minimum length a tuple with this arity can have.
+        ///
+        /// If the tuple has variadic interpolation ("unpacking"),
+        /// This will be equal to the number of non-variadic elements.
+        min_len: usize,
+        /// The total number of elements contained in a tuple with this arity.
+        ///
+        /// This is `min_len` plus the number of unpacked arguments.
+        element_count: usize,
+    },
+}
+
+impl TupleArity {
+    /// Returns whether the represented tuple is empty (the unit type).
+    pub fn is_empty(&self) -> bool {
+        self.is_exactly(0)
+    }
+
+    /// Returns whether the represented tuple has exactly the length specified.
+    pub fn is_exactly(&self, len: usize) -> bool {
+        matches!(self, TupleArity::Exact(lhs) if *lhs == len)
+    }
+
+    /// Returns the minimum length intersecting with this arity.
+    pub fn min_len(self) -> usize {
+        match self {
+            TupleArity::Exact(n) => n,
+            TupleArity::Inexact { min_len, .. } => min_len,
+        }
+    }
+
+    /// Returns the number of elements (types) in the tuple with this arity.
+    pub fn element_count(self) -> usize {
+        match self {
+            TupleArity::Exact(n) => n,
+            TupleArity::Inexact { element_count, .. } => element_count,
+        }
+    }
+
+    /// Returns whether two tuple arities can represent tuples with the same exact arity.
+    pub fn intersects(&self, rhs: &TupleArity) -> bool {
+        match (self, rhs) {
+            (TupleArity::Exact(a), TupleArity::Inexact { min_len: b, .. }) => a >= b,
+            (TupleArity::Inexact { min_len: a, .. }, TupleArity::Exact(b)) => a <= b,
+            (TupleArity::Inexact { .. }, TupleArity::Inexact { .. }) => true,
+            (TupleArity::Exact(a), TupleArity::Exact(b)) => a == b,
+        }
+    }
+
+    /// Returns the intersection of the arities of two tuples.
+    pub fn intersection(self, rhs: TupleArity) -> Option<TupleArity> {
+        let overlap = match (self, rhs) {
+            (TupleArity::Exact(a), TupleArity::Inexact { min_len: b, .. }) if a >= b => {
+                TupleArity::Exact(a)
+            }
+            (TupleArity::Inexact { min_len: a, .. }, TupleArity::Exact(b)) if b >= a => {
+                TupleArity::Exact(b)
+            }
+            (TupleArity::Inexact { min_len: a, .. }, TupleArity::Inexact { min_len: b, .. }) => {
+                let len = usize::max(a, b);
+                TupleArity::Inexact {
+                    min_len: len,
+                    // this is okay since this arity doesn't represent any actual type.
+                    element_count: len,
+                }
+            }
+            (TupleArity::Exact(a), TupleArity::Exact(b)) if a == b => TupleArity::Exact(a),
+            _ => return None,
+        };
+        Some(overlap)
+    }
+}
+
 /// An universe index is how a universally quantified parameter is
 /// represented when it's binder is moved into the environment.
 /// An example chain of transformations would be:
@@ -593,7 +673,7 @@ pub enum TyKind<I: Interner> {
     Scalar(Scalar),
 
     /// a tuple of the given arity
-    Tuple(usize, TupleContents<I>),
+    Tuple(TupleArity, TupleContents<I>),
 
     /// an array type like `[T; N]`
     Array(Ty<I>, Const<I>),
@@ -752,6 +832,11 @@ impl<I: Interner> TyKind<I> {
             TyKind::InferenceVar(_, _) => TypeFlags::HAS_TY_INFER,
             TyKind::Function(fn_pointer) => fn_pointer.substitution.0.compute_flags(interner),
         }
+    }
+
+    /// Creates and interns a new empty tuple type.
+    pub fn unit_tuple(interner: I) -> Ty<I> {
+        TyKind::Tuple(TupleArity::Exact(0), TupleContents::empty(interner)).intern(interner)
     }
 }
 
@@ -1447,9 +1532,25 @@ impl<I: Interner> TupleElem<I> {
     }
 
     /// Gets the underlying ty, ignoring unpacking status.
+    ///
+    /// This is most useful when dealing with generating conditions.
     pub fn ty_any(&self, interner: I) -> &Ty<I> {
         match self.data(interner) {
             TupleElemData::Unpack(ty) | TupleElemData::Inline(ty) => ty,
+        }
+    }
+    /// Gets the underlying ty if this element is inline.
+    pub fn ty_inline(&self, interner: I) -> Option<&Ty<I>> {
+        match self.data(interner) {
+            TupleElemData::Inline(ty) => Some(ty),
+            TupleElemData::Unpack(_) => None,
+        }
+    }
+    /// Gets the underlying ty if this element is unpacked.
+    pub fn ty_unpacked(&self, interner: I) -> Option<&Ty<I>> {
+        match self.data(interner) {
+            TupleElemData::Unpack(ty) => Some(ty),
+            TupleElemData::Inline(_) => None,
         }
     }
 
@@ -1470,10 +1571,17 @@ impl<I: Interner> TupleElem<I> {
 /// Generic arguments data.
 #[derive(Clone, PartialEq, Eq, Hash, TypeVisitable, TypeFoldable, Zip)]
 pub enum TupleElemData<I: Interner> {
-    // A variadically unpacked tuple element `(..T)`.
+    /// A variadically unpacked tuple element `(..T)`.
     Unpack(Ty<I>),
-    // A typical tuple element `(T,)`.
+    /// A typical tuple element `(T,)`.
     Inline(Ty<I>),
+}
+
+impl<I: Interner> TupleElemData<I> {
+    /// Create an interned type.
+    pub fn intern(self, interner: I) -> TupleElem<I> {
+        TupleElem::new(interner, self)
+    }
 }
 
 /// A generic argument, see `GenericArgData` for more information.

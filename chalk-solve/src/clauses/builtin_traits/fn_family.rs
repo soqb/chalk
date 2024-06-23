@@ -3,7 +3,8 @@ use crate::rust_ir::{ClosureKind, FnDefInputsAndOutputDatum, WellKnownTrait};
 use crate::{Interner, RustIrDatabase, TraitRef};
 use chalk_ir::cast::Cast;
 use chalk_ir::{
-    AliasTy, Binders, Normalize, ProjectionTy, Safety, Substitution, TraitId, Ty, TyKind,
+    AliasTy, Binders, Normalize, ProjectionTy, Safety, Substitution, TraitId, TupleArity,
+    TupleContents, TupleElem, Ty, TyKind,
 };
 
 fn push_clauses<I: Interner>(
@@ -12,11 +13,13 @@ fn push_clauses<I: Interner>(
     well_known: WellKnownTrait,
     trait_id: TraitId<I>,
     self_ty: Ty<I>,
-    arg_sub: Substitution<I>,
+    arg_sub: TupleContents<I>,
     return_type: Ty<I>,
 ) {
     let interner = db.interner();
-    let tupled = TyKind::Tuple(arg_sub.len(interner), arg_sub).intern(interner);
+    // we assume there are no unpacked parameters. should really be checked.
+    let arity = TupleArity::Exact(arg_sub.len(interner));
+    let tupled = TyKind::Tuple(arity, arg_sub).intern(interner);
     let substitution =
         Substitution::from_iter(interner, &[self_ty.cast(interner), tupled.cast(interner)]);
     builder.push_fact(TraitRef {
@@ -57,12 +60,12 @@ fn push_clauses_for_apply<I: Interner>(
 ) {
     let interner = db.interner();
     builder.push_binders(inputs_and_output, |builder, inputs_and_output| {
-        let arg_sub = inputs_and_output
+        let arg_contents = inputs_and_output
             .argument_types
             .iter()
             .cloned()
-            .map(|ty| ty.cast(interner));
-        let arg_sub = Substitution::from_iter(interner, arg_sub);
+            .map(|ty| ty.cast::<TupleElem<I>>(interner));
+        let arg_sub = TupleContents::from_iter(interner, arg_contents);
         let output_ty = inputs_and_output.return_type;
 
         push_clauses(
@@ -132,11 +135,18 @@ pub fn add_fn_trait_program_clauses<I: Interner>(
             let bound_ref = fn_val.clone().into_binders(interner);
             builder.push_binders(bound_ref, |builder, orig_sub| {
                 // The last parameter represents the function return type
-                let (arg_sub, fn_output_ty) = orig_sub
+                let (arg_contents, fn_output_ty) = orig_sub
                     .0
                     .as_slice(interner)
                     .split_at(orig_sub.0.len(interner) - 1);
-                let arg_sub = Substitution::from_iter(interner, arg_sub);
+                let arg_contents = TupleContents::from_iter(
+                    interner,
+                    arg_contents.iter().map(|arg| {
+                        arg.assert_ty_ref(interner)
+                            .clone()
+                            .cast::<TupleElem<I>>(interner)
+                    }),
+                );
                 let output_ty = fn_output_ty[0].assert_ty_ref(interner).clone();
 
                 push_clauses(
@@ -145,7 +155,7 @@ pub fn add_fn_trait_program_clauses<I: Interner>(
                     well_known,
                     trait_id,
                     self_ty.clone(),
-                    arg_sub,
+                    arg_contents,
                     output_ty,
                 );
             });

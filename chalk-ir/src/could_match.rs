@@ -61,14 +61,9 @@ where
                     ) => assoc_ty_a == assoc_ty_b && matches(substitution_a, substitution_b),
                     (TyKind::Scalar(scalar_a), TyKind::Scalar(scalar_b)) => scalar_a == scalar_b,
                     (TyKind::Str, TyKind::Str) => true,
-                    (
-                        TyKind::Tuple(arity_a, substitution_a),
-                        TyKind::Tuple(arity_b, substitution_b),
-                    ) => {
-                        arity_a == arity_b && {
-                            // fixme: figure out could_match algo.
-                            true
-                        }
+                    (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => {
+                        // FIXME(soqb): figure out better could_match algo?
+                        arity_a == arity_b
                     }
                     (
                         TyKind::OpaqueType(opaque_ty_a, substitution_a),
@@ -190,6 +185,18 @@ where
 
             fn unification_database(&self) -> &dyn UnificationDatabase<I> {
                 self.db
+            }
+
+            fn zip_tuple_contents(
+                &mut self,
+                ambient: Variance,
+                variances: Option<Variances<I>>,
+                a_arity: TupleArity,
+                b_arity: TupleArity,
+                a: &[TupleElem<I>],
+                b: &[TupleElem<I>],
+            ) -> Fallible<()> {
+                Ok(())
             }
         }
     }

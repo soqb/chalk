@@ -234,18 +234,15 @@ impl<'t, I: Interner> Unifier<'t, I> {
                 Zip::zip_with(self, variance, scalar_a, scalar_b)
             }
             (TyKind::Str, TyKind::Str) => Ok(()),
-            (TyKind::Tuple(arity_a, substitution_a), TyKind::Tuple(arity_b, substitution_b)) => {
-                if arity_a != arity_b {
+            (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => {
+                if arity_a.intersects(arity_b) {
                     return Err(NoSolution);
                 }
-                self.zip_substs(
-                    variance,
-                    Some(Variances::from_iter(
-                        self.interner,
-                        std::iter::repeat(Variance::Covariant).take(*arity_a),
-                    )),
-                    substitution_a.as_slice(interner),
-                    substitution_b.as_slice(interner),
+
+                self.relate_tuple_contents(
+                    variance.xform(Variance::Covariant),
+                    contents_a.as_slice(interner),
+                    contents_b.as_slice(interner),
                 )
             }
             (
@@ -367,8 +364,7 @@ impl<'t, I: Interner> Unifier<'t, I> {
         Ok(())
     }
 
-    /// Unify a general inference variable with a specific inference variable
-    /// (type kind is not `General`). For example, unify a `TyVariableKind::General`
+    /// Unify a general inference variable with a specific inference variablself.relate_ty_ty(, , )variance  a /b// (type kind is not `General`). For example, unify a `TyVariableKind::General`
     /// inference variable with a `TyVariableKind::Integer` variable, resulting in the
     /// general inference variable narrowing to an integer variable.
 
@@ -522,9 +518,9 @@ impl<'t, I: Interner> Unifier<'t, I> {
             .intern(interner),
             TyKind::Scalar(scalar) => TyKind::Scalar(*scalar).intern(interner),
             TyKind::Str => TyKind::Str.intern(interner),
-            TyKind::Tuple(arity, substitution) => TyKind::Tuple(
+            TyKind::Tuple(arity, contents) => TyKind::Tuple(
                 *arity,
-                self.generalize_substitution(substitution, universe_index, |_| variance),
+                self.generalize_tuple_contents(contents, universe_index, |_| variance),
             )
             .intern(interner),
             TyKind::OpaqueType(id, substitution) => TyKind::OpaqueType(
@@ -834,6 +830,29 @@ impl<'t, I: Interner> Unifier<'t, I> {
         Substitution::from_iter(interner, vars)
     }
 
+    #[instrument(level = "debug", skip(self, get_variance))]
+    fn generalize_tuple_contents<F: Fn(usize) -> Variance>(
+        &mut self,
+        tuple_contents: &TupleContents<I>,
+        universe_index: UniverseIndex,
+        get_variance: F,
+    ) -> TupleContents<I> {
+        let interner = self.interner;
+        let vars = tuple_contents
+            .iter(interner)
+            .enumerate()
+            .map(|(i, tuple_elem)| {
+                let variance = get_variance(i);
+                let ty = self.generalize_ty(tuple_elem.ty_any(interner), universe_index, variance);
+                match tuple_elem.data(interner) {
+                    TupleElemData::Unpack(_) => TupleElemData::Unpack(ty).intern(interner),
+                    TupleElemData::Inline(_) => TupleElemData::Inline(ty).intern(interner),
+                }
+            });
+
+        TupleContents::from_iter(interner, vars)
+    }
+
     /// Unify an inference variable `var` with some non-inference
     /// variable `ty`, just bind `var` to `ty`. But we must enforce two conditions:
     ///
@@ -1111,6 +1130,27 @@ impl<'t, I: Interner> Unifier<'t, I> {
         }
     }
 
+    fn relate_tuple_contents(
+        &mut self,
+        variance: Variance,
+        a: &[TupleElem<I>],
+        b: &[TupleElem<I>],
+    ) -> Fallible<()> {
+        let interner = self.interner();
+        for (el_a, el_b) in a.iter().zip(b) {
+            match (el_a.data(interner), el_b.data(interner)) {
+                (TupleElemData::Unpack(a), TupleElemData::Unpack(b))
+                | (TupleElemData::Inline(a), TupleElemData::Inline(b)) => {
+                    self.relate_ty_ty(variance, a, b)?;
+                }
+                (TupleElemData::Unpack(_), TupleElemData::Inline(_)) => return Err(NoSolution),
+                (TupleElemData::Inline(_), TupleElemData::Unpack(_)) => return Err(NoSolution),
+            }
+        }
+
+        Ok(())
+    }
+
     #[instrument(level = "debug", skip(self))]
     fn unify_var_const(&mut self, var: InferenceVar, c: &Const<I>) -> Fallible<()> {
         let interner = self.interner;
@@ -1187,6 +1227,18 @@ impl<'i, I: Interner> Zipper<I> for Unifier<'i, I> {
 
     fn zip_consts(&mut self, variance: Variance, a: &Const<I>, b: &Const<I>) -> Fallible<()> {
         self.relate_const_const(variance, a, b)
+    }
+
+    fn zip_tuple_contents(
+        &mut self,
+        ambient: Variance,
+        _variances: Option<Variances<I>>,
+        _a_arity: TupleArity,
+        _b_arity: TupleArity,
+        a: &[TupleElem<I>],
+        b: &[TupleElem<I>],
+    ) -> Fallible<()> {
+        self.relate_tuple_contents(ambient, a, b)
     }
 
     fn zip_binders<T>(&mut self, variance: Variance, a: &Binders<T>, b: &Binders<T>) -> Fallible<()>

@@ -775,7 +775,10 @@ impl LowerWithEnv for Ty {
 
                 let mut lowered_tys = Vec::with_capacity(types.len());
                 for ty in types {
-                    lowered_tys.push(ty.lower(&quantified_env)?.cast(interner));
+                    lowered_tys.push(
+                        ty.lower(&quantified_env)?
+                            .cast::<chalk_ir::GenericArg<_>>(interner),
+                    );
                 }
 
                 let function = chalk_ir::FnPointer {
@@ -785,14 +788,33 @@ impl LowerWithEnv for Ty {
                 };
                 chalk_ir::TyKind::Function(function).intern(interner)
             }
-            Ty::Tuple { ref elems } => chalk_ir::TyKind::Tuple(
-                elems.len(),
-                chalk_ir::TupleContents::from_fallible(
-                    interner,
-                    elems.iter().map(|t| t.lower(env)),
-                )?,
-            )
-            .intern(interner),
+            Ty::Tuple { ref elems } => {
+                let (num_unpack, num_inline) =
+                    elems
+                        .iter()
+                        .fold((0, 0), |(unpacked, inline), elem| match elem {
+                            TupleElem::Unpack(_) => (unpacked + 1, inline),
+                            TupleElem::Inline(_) => (unpacked, inline + 1),
+                        });
+
+                let arity = if num_unpack == 0 {
+                    chalk_ir::TupleArity::Exact(num_inline)
+                } else {
+                    chalk_ir::TupleArity::Inexact {
+                        min_len: num_inline,
+                        element_count: num_inline + num_unpack,
+                    }
+                };
+
+                chalk_ir::TyKind::Tuple(
+                    arity,
+                    chalk_ir::TupleContents::from_fallible(
+                        interner,
+                        elems.iter().map(|t| t.lower(env)),
+                    )?,
+                )
+                .intern(interner)
+            }
 
             Ty::Scalar { ty } => chalk_ir::TyKind::Scalar(ty.lower()).intern(interner),
 
@@ -842,6 +864,24 @@ impl LowerWithEnv for Const {
                 value: chalk_ir::ConstValue::Concrete(chalk_ir::ConcreteConst { interned: *value }),
             }
             .intern(interner)),
+        }
+    }
+}
+
+impl LowerWithEnv for TupleElem {
+    type Lowered = chalk_ir::TupleElem<ChalkIr>;
+
+    fn lower(&self, env: &Env) -> LowerResult<Self::Lowered> {
+        let interner = env.interner();
+        match self {
+            TupleElem::Unpack(ty) => {
+                let ty = ty.lower(env)?;
+                Ok(chalk_ir::TupleElemData::Unpack(ty).intern(interner))
+            }
+            TupleElem::Inline(ty) => {
+                let ty = ty.lower(env)?;
+                Ok(chalk_ir::TupleElemData::Inline(ty).intern(interner))
+            }
         }
     }
 }

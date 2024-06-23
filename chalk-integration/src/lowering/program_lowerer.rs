@@ -245,17 +245,21 @@ impl ProgramLowerer {
                     let (kind, inputs_and_output) = defn.lower(&empty_env)?;
                     closure_closure_kind.insert(closure_def_id, kind);
                     closure_inputs_and_output.insert(closure_def_id, inputs_and_output);
-                    let upvars =
-                        empty_env.in_binders(defn.all_parameters(), |env| {
-                            let upvar_tys: LowerResult<Vec<chalk_ir::Ty<ChalkIr>>> =
-                                defn.upvars.iter().map(|ty| ty.lower(env)).collect();
-                            let substitution = chalk_ir::Substitution::from_iter(
-                                ChalkIr,
-                                upvar_tys?.into_iter().map(|ty| ty.cast(ChalkIr)),
-                            );
-                            Ok(chalk_ir::TyKind::Tuple(defn.upvars.len(), substitution)
-                                .intern(ChalkIr))
-                        })?;
+                    let upvars = empty_env.in_binders(defn.all_parameters(), |env| {
+                        let upvar_tys: LowerResult<Vec<chalk_ir::Ty<ChalkIr>>> =
+                            defn.upvars.iter().map(|ty| ty.lower(env)).collect();
+                        let contents = chalk_ir::TupleContents::from_iter(
+                            ChalkIr,
+                            upvar_tys?
+                                .into_iter()
+                                .map(|ty| ty.cast::<chalk_ir::TupleElem<_>>(ChalkIr)),
+                        );
+                        Ok(chalk_ir::TyKind::Tuple(
+                            chalk_ir::TupleArity::Exact(defn.upvars.len()),
+                            contents,
+                        )
+                        .intern(ChalkIr))
+                    })?;
                     closure_upvars.insert(closure_def_id, upvars);
                 }
                 Item::TraitDefn(ref trait_defn) => {

@@ -8,8 +8,9 @@ use crate::{
     try_break, AdtId, AssocTypeId, ClausePriority, ClosureId, Constraints, ControlFlow,
     CoroutineId, DebruijnIndex, FloatTy, FnDefId, ForeignDefId, GenericArg, Goals, ImplId, IntTy,
     Interner, Mutability, OpaqueTyId, PlaceholderIndex, ProgramClause, ProgramClauses,
-    QuantifiedWhereClauses, QuantifierKind, Safety, Scalar, Substitution, TraitId, TupleContents,
-    TupleElem, TypeSuperVisitable, TypeVisitable, TypeVisitor, UintTy, UniverseIndex,
+    QuantifiedWhereClauses, QuantifierKind, Safety, Scalar, Substitution, TraitId, TupleArity,
+    TupleContents, TupleElem, TypeSuperVisitable, TypeVisitable, TypeVisitor, UintTy,
+    UniverseIndex,
 };
 use std::{marker::PhantomData, sync::Arc};
 
@@ -192,6 +193,7 @@ const_visit!(DebruijnIndex);
 const_visit!(ClausePriority);
 const_visit!(());
 const_visit!(Scalar);
+const_visit!(TupleArity);
 const_visit!(UintTy);
 const_visit!(IntTy);
 const_visit!(FloatTy);

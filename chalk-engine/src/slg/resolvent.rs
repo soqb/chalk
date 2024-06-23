@@ -463,15 +463,17 @@ impl<'i, I: Interner> Zipper<I> for AnswerSubstitutor<'i, I> {
                 Zip::zip_with(self, variance, scalar_a, scalar_b)
             }
             (TyKind::Str, TyKind::Str) => Ok(()),
-            (TyKind::Tuple(arity_a, substitution_a), TyKind::Tuple(arity_b, substitution_b)) => {
+            (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => {
                 if arity_a != arity_b {
                     return Err(NoSolution);
                 }
-                self.zip_substs(
+                self.zip_tuple_contents(
                     variance,
                     None,
-                    substitution_a.as_slice(interner),
-                    substitution_b.as_slice(interner),
+                    *arity_a,
+                    *arity_b,
+                    contents_a.as_slice(interner),
+                    contents_b.as_slice(interner),
                 )
             }
             (
@@ -726,5 +728,29 @@ impl<'i, I: Interner> Zipper<I> for AnswerSubstitutor<'i, I> {
 
     fn unification_database(&self) -> &dyn UnificationDatabase<I> {
         self.unification_database
+    }
+
+    fn zip_tuple_contents(
+        &mut self,
+        variance: Variance,
+        _variances: Option<Variances<I>>,
+        _a_arity: TupleArity,
+        _b_arity: TupleArity,
+        a: &[TupleElem<I>],
+        b: &[TupleElem<I>],
+    ) -> Fallible<()> {
+        let interner = self.interner();
+        for (el_a, el_b) in a.iter().zip(b) {
+            match (el_a.data(interner), el_b.data(interner)) {
+                (TupleElemData::Unpack(a), TupleElemData::Unpack(b))
+                | (TupleElemData::Inline(a), TupleElemData::Inline(b)) => {
+                    self.zip_tys(variance, a, b)?;
+                }
+                (TupleElemData::Unpack(_), TupleElemData::Inline(_)) => return Err(NoSolution),
+                (TupleElemData::Inline(_), TupleElemData::Unpack(_)) => return Err(NoSolution),
+            }
+        }
+
+        Ok(())
     }
 }

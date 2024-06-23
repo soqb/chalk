@@ -38,11 +38,14 @@ fn constituent_types<I: Interner>(db: &dyn RustIrDatabase<I>, ty: &TyKind<I>) ->
                 .collect()
         }
         // And for `PhantomData<T>`, we pass `T`.
-        TyKind::Adt(_, substitution)
-        | TyKind::Tuple(_, substitution)
-        | TyKind::FnDef(_, substitution) => substitution
+        TyKind::Adt(_, substitution) | TyKind::FnDef(_, substitution) => substitution
             .iter(interner)
             .filter_map(|x| x.ty(interner))
+            .cloned()
+            .collect(),
+        TyKind::Tuple(_, contents) => contents
+            .iter(interner)
+            .map(|x| x.ty_any(interner))
             .cloned()
             .collect(),
 
@@ -144,7 +147,7 @@ pub fn push_auto_trait_impls<I: Interner>(
 
     let mk_ref = |ty: Ty<I>| TraitRef {
         trait_id: auto_trait_id,
-        substitution: Substitution::from1(interner, ty.cast(interner)),
+        substitution: Substitution::from1(interner, ty.cast::<GenericArg<I>>(interner)),
     };
 
     let consequence = mk_ref(ty.clone().intern(interner));
@@ -937,7 +940,7 @@ fn match_ty<I: Interner>(
         | TyKind::Never
         | TyKind::Scalar(_)
         | TyKind::Foreign(_)
-        | TyKind::Tuple(0, _) => {
+        | TyKind::Tuple(TupleArity::Exact(0), _) => {
             // These have no substitutions, so they are trivially WF
             builder.push_fact(WellFormed::Ty(ty.clone()));
         }
@@ -1028,32 +1031,53 @@ fn match_ty<I: Interner>(
                 );
             });
         }
-        TyKind::Tuple(len, _) => {
-            // WF((T0, ..., Tn, U)) :- T0: Sized, ..., Tn: Sized, WF(T0), ..., WF(Tn), WF(U)
+        TyKind::Tuple(arity, elems) => {
+            // WF((T0, ..., Tn, U)) :- T0: Sized, ..., Tn: Sized, WF(T0), ..., WF(Tn), WF(U),
+            //
+            // This is true whether T0 through U are unpacked or not,
+            // although for unpacked elements, we additionally impose that they implement `Tuple`.
             let interner = builder.interner();
             let binders = Binders::new(
                 VariableKinds::from_iter(
                     interner,
-                    iter::repeat_with(|| VariableKind::Ty(TyVariableKind::General)).take(*len),
+                    iter::repeat_with(|| VariableKind::Ty(TyVariableKind::General))
+                        .take(arity.element_count()),
                 ),
                 PhantomData::<I>,
             );
             builder.push_binders(binders, |builder, PhantomData| {
                 let placeholders_in_scope = builder.placeholders_in_scope();
 
-                let substs = Substitution::from_iter(
+                let contents = TupleContents::from_iter(
                     builder.interner(),
-                    &placeholders_in_scope[placeholders_in_scope.len() - len..],
+                    placeholders_in_scope[placeholders_in_scope.len() - arity.element_count()..]
+                        .iter()
+                        .map(|arg| arg.assert_ty_ref(interner))
+                        .cloned()
+                        .zip(elems.iter(interner).map(|elem| elem.is_unpacked(interner)))
+                        .map(|(ty, unpacked)| {
+                            if unpacked {
+                                TupleElemData::Unpack(ty).intern(interner)
+                            } else {
+                                TupleElemData::Inline(ty).intern(interner)
+                            }
+                        }),
                 );
 
-                let tuple_ty = TyKind::Tuple(*len, substs.clone()).intern(interner);
+                let tuple_ty = TyKind::Tuple(*arity, contents.clone()).intern(interner);
+                println!(
+                    " >> ## >> lhs = {:?}; rhs = {:?}",
+                    ty.kind(interner),
+                    tuple_ty
+                );
                 let sized = builder.db.well_known_trait_id(WellKnownTrait::Sized);
+                let tuple = builder.db.well_known_trait_id(WellKnownTrait::Tuple);
                 builder.push_clause(
                     WellFormed::Ty(tuple_ty),
-                    substs.as_slice(interner)[..*len - 1]
+                    contents.as_slice(interner)[..arity.element_count() - 1]
                         .iter()
-                        .filter_map(|s| {
-                            let ty_var = s.assert_ty_ref(interner).clone();
+                        .filter_map(|elem| {
+                            let ty_var = elem.ty_any(interner).clone();
                             sized.map(|id| {
                                 DomainGoal::Holds(WhereClause::Implemented(TraitRef {
                                     trait_id: id,
@@ -1061,10 +1085,21 @@ fn match_ty<I: Interner>(
                                 }))
                             })
                         })
-                        .chain(substs.iter(interner).map(|subst| {
-                            DomainGoal::WellFormed(WellFormed::Ty(
-                                subst.assert_ty_ref(interner).clone(),
-                            ))
+                        .chain(contents.iter(interner).filter_map(|elem| {
+                            if !elem.is_unpacked(interner) {
+                                return None;
+                            }
+
+                            let ty_var = elem.ty_any(interner).clone();
+                            tuple.map(|id| {
+                                DomainGoal::Holds(WhereClause::Implemented(TraitRef {
+                                    trait_id: id,
+                                    substitution: Substitution::from1(interner, ty_var),
+                                }))
+                            })
+                        }))
+                        .chain(contents.iter(interner).map(|elem| {
+                            DomainGoal::WellFormed(WellFormed::Ty(elem.ty_any(interner).clone()))
                         })),
                 );
             });

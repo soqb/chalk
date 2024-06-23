@@ -1,7 +1,7 @@
 use crate::tls;
 use chalk_ir::{
     interner::{HasInterner, Interner},
-    TyKind,
+    TupleElem, TupleElemData, TyKind,
 };
 use chalk_ir::{
     AdtId, AliasTy, AssocTypeId, CanonicalVarKind, CanonicalVarKinds, ConstData, Constraint,
@@ -61,9 +61,11 @@ impl Interner for ChalkIr {
     type InternedConst = Arc<ConstData<ChalkIr>>;
     type InternedConcreteConst = u32;
     type InternedGenericArg = GenericArgData<ChalkIr>;
+    type InternedTupleElem = TupleElemData<ChalkIr>;
     type InternedGoal = Arc<GoalData<ChalkIr>>;
     type InternedGoals = Vec<Goal<ChalkIr>>;
     type InternedSubstitution = Vec<GenericArg<ChalkIr>>;
+    type InternedTupleContents = Vec<TupleElem<ChalkIr>>;
     type InternedProgramClause = ProgramClauseData<ChalkIr>;
     type InternedProgramClauses = Vec<ProgramClause<ChalkIr>>;
     type InternedQuantifiedWhereClauses = Vec<QuantifiedWhereClause<ChalkIr>>;
@@ -273,6 +275,14 @@ impl Interner for ChalkIr {
         generic_arg
     }
 
+    fn intern_tuple_elem(self, tuple_elem: TupleElemData<ChalkIr>) -> TupleElemData<ChalkIr> {
+        tuple_elem
+    }
+
+    fn tuple_elem_data(self, tuple_elem: &TupleElemData<ChalkIr>) -> &TupleElemData<ChalkIr> {
+        tuple_elem
+    }
+
     fn intern_goal(self, goal: GoalData<ChalkIr>) -> Arc<GoalData<ChalkIr>> {
         Arc::new(goal)
     }
@@ -300,6 +310,17 @@ impl Interner for ChalkIr {
     }
 
     fn substitution_data(self, substitution: &Vec<GenericArg<ChalkIr>>) -> &[GenericArg<ChalkIr>] {
+        substitution
+    }
+
+    fn intern_tuple_contents<E>(
+        self,
+        data: impl IntoIterator<Item = Result<TupleElem<ChalkIr>, E>>,
+    ) -> Result<Vec<TupleElem<ChalkIr>>, E> {
+        data.into_iter().collect()
+    }
+
+    fn tuple_contents_data(self, substitution: &Vec<TupleElem<ChalkIr>>) -> &[TupleElem<ChalkIr>] {
         substitution
     }
 

@@ -65,40 +65,25 @@ pub fn add_pointee_program_clauses<I: Interner>(
         | TyKind::InferenceVar(_, TyVariableKind::Integer)
         | TyKind::Coroutine(_, _)
         | TyKind::CoroutineWitness(_, _)
-        | TyKind::Ref(_, _, _) => push_clauses(
-            db,
-            builder,
-            self_ty,
-            TyKind::Tuple(0, Substitution::empty(interner)).intern(interner),
-        ),
+        | TyKind::Ref(_, _, _) => push_clauses(db, builder, self_ty, TyKind::unit_tuple(interner)),
         TyKind::Adt(id, subst) => {
             if let Some(last_field_ty) = last_field_of_struct(db, *id, subst) {
                 push_for_last_field(last_field_ty, db, builder, self_ty);
             } else {
-                push_clauses(
-                    db,
-                    builder,
-                    self_ty,
-                    TyKind::Tuple(0, Substitution::empty(interner)).intern(interner),
-                );
+                push_clauses(db, builder, self_ty, TyKind::unit_tuple(interner));
             }
         }
         TyKind::Tuple(_, subst) => {
             let last_field_ty = subst
                 .iter(interner)
                 .rev()
+                .filter_map(|x| x.ty_inline(interner))
                 .next()
-                .and_then(|x| x.ty(interner))
                 .cloned();
             if let Some(last_field_ty) = last_field_ty {
                 push_for_last_field(last_field_ty, db, builder, self_ty);
             } else {
-                push_clauses(
-                    db,
-                    builder,
-                    self_ty,
-                    TyKind::Tuple(0, Substitution::empty(interner)).intern(interner),
-                );
+                push_clauses(db, builder, self_ty, TyKind::unit_tuple(interner));
             }
         }
         TyKind::BoundVar(_)

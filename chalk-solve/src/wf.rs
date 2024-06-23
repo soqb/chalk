@@ -122,10 +122,10 @@ impl<I: Interner> TypeVisitor<I> for InputTypeCollector<I> {
                 push_ty();
                 ControlFlow::Continue(())
             }
-            TyKind::Tuple(arity, substitution) => {
+            TyKind::Tuple(arity, contents) => {
                 push_ty();
                 arity.visit_with(self, outer_binder);
-                substitution.visit_with(self, outer_binder)
+                contents.visit_with(self, outer_binder)
             }
             TyKind::OpaqueType(opaque_ty, substitution) => {
                 push_ty();

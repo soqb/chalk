@@ -62,14 +62,14 @@ impl<I: Interner> RenderAsRust<I> for TyKind<I> {
                     substitution
                         .as_slice(interner)
                         .iter()
-                        .map(|p| p.display(s))
+                        .map(|elem| elem.display(s))
                         .format(", "),
-                    if *arity == 1 {
+                    if arity.is_exactly(1) {
                         // need trailing single comma
                         ","
                     } else {
                         ""
-                    }
+                    },
                 )
             }
             TyKind::OpaqueType(opaque_ty_id, substitution) => write!(
@@ -276,6 +276,15 @@ impl<I: Interner> RenderAsRust<I> for GenericArgData<I> {
     }
 }
 
+impl<I: Interner> RenderAsRust<I> for TupleElemData<I> {
+    fn fmt(&self, s: &InternalWriterState<'_, I>, f: &'_ mut Formatter<'_>) -> Result {
+        match self {
+            TupleElemData::Unpack(ty) => write!(f, "..{}", ty.display(s)),
+            TupleElemData::Inline(ty) => write!(f, "{}", ty.display(s)),
+        }
+    }
+}
+
 impl<I: Interner> RenderAsRust<I> for Ty<I> {
     fn fmt(&self, s: &InternalWriterState<'_, I>, f: &'_ mut Formatter<'_>) -> Result {
         // delegate to TyKind
@@ -299,6 +308,13 @@ impl<I: Interner> RenderAsRust<I> for Const<I> {
 impl<I: Interner> RenderAsRust<I> for GenericArg<I> {
     fn fmt(&self, s: &InternalWriterState<'_, I>, f: &'_ mut Formatter<'_>) -> Result {
         // delegate to GenericArgData
+        self.data(s.db().interner()).fmt(s, f)
+    }
+}
+
+impl<I: Interner> RenderAsRust<I> for TupleElem<I> {
+    fn fmt(&self, s: &InternalWriterState<'_, I>, f: &'_ mut Formatter<'_>) -> Result {
+        // delegate to TupleElemData
         self.data(s.db().interner()).fmt(s, f)
     }
 }

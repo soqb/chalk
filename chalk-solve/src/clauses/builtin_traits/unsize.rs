@@ -5,6 +5,7 @@ use std::ops::ControlFlow;
 use crate::clauses::ClauseBuilder;
 use crate::rust_ir::AdtKind;
 use crate::{Interner, RustIrDatabase, TraitRef, WellKnownTrait};
+use chalk_ir::TupleContents;
 use chalk_ir::{
     cast::Cast,
     interner::HasInterner,
@@ -431,24 +432,24 @@ pub fn add_unsize_program_clauses<I: Interner>(
         }
 
         // (.., T) -> (.., U)
-        (TyKind::Tuple(arity_a, substitution_a), TyKind::Tuple(arity_b, substitution_b)) => {
-            if arity_a != arity_b || *arity_a == 0 {
+        (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => {
+            if arity_b.is_empty() || !arity_a.intersects(arity_b) {
                 return;
             }
             let arity = arity_a;
 
-            let tail_ty_a = substitution_a.iter(interner).last().unwrap();
-            let tail_ty_b = substitution_b.iter(interner).last().unwrap();
+            let tail_ty_a = contents_a.iter(interner).last().unwrap();
+            let tail_ty_b = contents_b.iter(interner).last().unwrap();
 
             // Check that the source tuple with the target's
             // last element is equal to the target.
             let new_tuple = TyKind::Tuple(
                 *arity,
-                Substitution::from_iter(
+                TupleContents::from_iter(
                     interner,
-                    substitution_a
+                    contents_a
                         .iter(interner)
-                        .take(arity - 1)
+                        .take(arity.element_count() - 1)
                         .chain(iter::once(tail_ty_b)),
                 ),
             )
@@ -466,7 +467,10 @@ pub fn add_unsize_program_clauses<I: Interner>(
                 trait_id: unsize_trait_id,
                 substitution: Substitution::from_iter(
                     interner,
-                    [tail_ty_a, tail_ty_b].iter().cloned(),
+                    [tail_ty_a.ty_any(interner), tail_ty_b.ty_any(interner)]
+                        .iter()
+                        .copied()
+                        .cloned(),
                 ),
             }
             .cast(interner);

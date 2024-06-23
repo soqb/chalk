@@ -11,8 +11,8 @@ use crate::{
     RustIrDatabase,
 };
 use chalk_ir::{
-    interner::Interner, Binders, CanonicalVarKinds, CoroutineId, Substitution, Ty,
-    UnificationDatabase, VariableKinds, Variances,
+    interner::Interner, Binders, CanonicalVarKinds, CoroutineId, Ty, UnificationDatabase,
+    VariableKinds, Variances,
 };
 
 #[derive(Debug)]
@@ -141,8 +141,7 @@ impl<I: Interner, DB: RustIrDatabase<I>> RustIrDatabase<I> for StubWrapper<'_, D
     fn hidden_opaque_type(&self, _id: chalk_ir::OpaqueTyId<I>) -> chalk_ir::Ty<I> {
         // Return a unit since the particular hidden type doesn't matter (If it
         // did matter, it would have been recorded)
-        chalk_ir::TyKind::Tuple(0, Substitution::empty(self.db.interner()))
-            .intern(self.db.interner())
+        chalk_ir::TyKind::unit_tuple(self.db.interner())
     }
 
     fn impls_for_trait(

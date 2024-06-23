@@ -67,6 +67,17 @@ pub trait Zipper<I: Interner> {
         Ok(())
     }
 
+    /// Zips tuple contents
+    fn zip_tuple_contents(
+        &mut self,
+        ambient: Variance,
+        variances: Option<Variances<I>>,
+        a_arity: TupleArity,
+        b_arity: TupleArity,
+        a: &[TupleElem<I>],
+        b: &[TupleElem<I>],
+    ) -> Fallible<()>;
+
     /// Retrieves the interner from the underlying zipper object
     fn interner(&self) -> I;
 
@@ -101,6 +112,18 @@ where
         T: Clone + HasInterner<Interner = I> + Zip<I> + TypeFoldable<I>,
     {
         (**self).zip_binders(variance, a, b)
+    }
+
+    fn zip_tuple_contents(
+        &mut self,
+        ambient: Variance,
+        variances: Option<Variances<I>>,
+        a_arity: TupleArity,
+        b_arity: TupleArity,
+        a: &[TupleElem<I>],
+        b: &[TupleElem<I>],
+    ) -> Fallible<()> {
+        (**self).zip_tuple_contents(ambient, variances, a_arity, b_arity, a, b)
     }
 
     fn interner(&self) -> I {

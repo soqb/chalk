@@ -288,11 +288,10 @@ impl<I: Interner> AntiUnifier<'_, I> {
                 }
             }
             (TyKind::Str, TyKind::Str) => TyKind::Str.intern(interner),
-            (TyKind::Tuple(arity_a, substitution_a), TyKind::Tuple(arity_b, substitution_b)) => {
-                self.aggregate_name_and_substs(arity_a, substitution_a, arity_b, substitution_b)
-                    .map(|(&name, substitution)| TyKind::Tuple(name, substitution).intern(interner))
-                    .unwrap_or_else(|| self.new_ty_variable())
-            }
+            (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => self
+                .aggregate_tuples(*arity_a, contents_a, *arity_b, contents_b)
+                .map(|(name, substitution)| TyKind::Tuple(name, substitution).intern(interner))
+                .unwrap_or_else(|| self.new_ty_variable()),
             (
                 TyKind::OpaqueType(id_a, substitution_a),
                 TyKind::OpaqueType(id_b, substitution_b),
@@ -486,6 +485,55 @@ impl<I: Interner> AntiUnifier<'_, I> {
                 panic!("mismatched parameter kinds: p1={:?} p2={:?}", p1, p2)
             }
         }
+    }
+
+    fn aggregate_tuples(
+        &mut self,
+        new_arity: TupleArity,
+        new_contents: &TupleContents<I>,
+        current_arity: TupleArity,
+        current_contents: &TupleContents<I>,
+    ) -> Option<(TupleArity, TupleContents<I>)> {
+        // FIXME(soqb): i am doing thios blindly i have no idea what's going on.
+        let interner = self.interner;
+        if new_arity != current_arity {
+            return None;
+        }
+
+        assert_eq!(
+            new_contents.len(interner),
+            current_contents.len(interner),
+            "does {:?} take {} substitution or {}? can't both be right",
+            new_arity,
+            new_contents.len(interner),
+            current_contents.len(interner)
+        );
+
+        for (i, (a, b)) in new_contents
+            .iter(interner)
+            .zip(new_contents.iter(interner))
+            .enumerate()
+        {
+            assert_eq!(
+                a.is_unpacked(interner),
+                b.is_unpacked(interner),
+                "element {} of {:?} encapsulates a mismatch",
+                i,
+                new_arity,
+            );
+        }
+
+        let contents = TupleContents::from_iter(
+            interner,
+            new_contents
+                .iter(interner)
+                .zip(current_contents.iter(interner))
+                .map(|(new, current)| {
+                    self.aggregate_tys(new.ty_any(interner), current.ty_any(interner))
+                }),
+        );
+
+        Some((new_arity, contents))
     }
 
     fn aggregate_lifetimes(&mut self, l1: &Lifetime<I>, l2: &Lifetime<I>) -> Lifetime<I> {

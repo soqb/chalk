@@ -212,6 +212,12 @@ impl<I: Interner> CastTo<TupleElem<I>> for TupleElem<I> {
     }
 }
 
+impl<I: Interner> CastTo<TupleElem<I>> for Ty<I> {
+    fn cast_to(self, interner: I) -> TupleElem<I> {
+        TupleElem::new(interner, TupleElemData::Inline(self))
+    }
+}
+
 impl<T, I> CastTo<ProgramClause<I>> for T
 where
     T: CastTo<DomainGoal<I>>,
