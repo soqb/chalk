@@ -206,6 +206,12 @@ impl<I: Interner> CastTo<GenericArg<I>> for GenericArg<I> {
     }
 }
 
+impl<I: Interner> CastTo<TupleElem<I>> for TupleElem<I> {
+    fn cast_to(self, _interner: I) -> TupleElem<I> {
+        self
+    }
+}
+
 impl<T, I> CastTo<ProgramClause<I>> for T
 where
     T: CastTo<DomainGoal<I>>,

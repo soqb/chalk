@@ -195,7 +195,7 @@ FnDefn: FnDefn = {
             variadic: args.is_variadic(),
         },
         argument_types: args.to_tys(),
-        return_type: ret_ty.unwrap_or_else(|| Ty::Tuple { types: Vec::new() }),
+        return_type: ret_ty.unwrap_or_else(|| Ty::Tuple { elems: Vec::new() }),
         variances,
     }
 };
@@ -218,7 +218,7 @@ CoroutineDefn: CoroutineDefn = {
        witness_lifetimes: l.unwrap_or_default(),
        resume_ty: resume,
        yield_ty: yield_ty,
-       return_ty: ret_ty.unwrap_or_else(|| Ty::Tuple { types: Vec::new() }),
+       return_ty: ret_ty.unwrap_or_else(|| Ty::Tuple { elems: Vec::new() }),
        witness_types: witnesses
    }
 }
@@ -243,7 +243,7 @@ ClosureDefn: ClosureDefn = {
         kind: s,
         variable_kinds: p,
         argument_types: args,
-        return_type: ret_ty.unwrap_or_else(|| Ty::Tuple { types: Vec::new() }),
+        return_type: ret_ty.unwrap_or_else(|| Ty::Tuple { elems: Vec::new() }),
         upvars: upvars,
     }
 }
@@ -421,7 +421,7 @@ TyWithoutId: Ty = {
         types: types
                    .to_tys()
                    .into_iter()
-                   .chain(std::iter::once(ret_ty.unwrap_or_else(|| Ty::Tuple { types: Vec::new() })))
+                   .chain(std::iter::once(ret_ty.unwrap_or_else(|| Ty::Tuple { elems: Vec::new() })))
                    .map(Box::new).collect(),
     },
     <ScalarType> => Ty::Scalar { ty: <> },
@@ -475,15 +475,21 @@ ScalarType: ScalarType = {
     "char" => ScalarType::Char,
 };
 
+TupleElem: TupleElem = {
+    ".." <ty:Ty> => TupleElem::Unpack(Box::new(ty)),
+    <ty:Ty> => TupleElem::Inline(Box::new(ty)),
+}
+
 TupleOrParensInner: Ty = {
     <Ty>,
-    <first:Ty> "," <rest:Comma<Ty>> => {
-        let mut types = Vec::with_capacity(rest.len() + 1);
-        types.push(Box::new(first));
-        types.extend(rest.into_iter().map(Box::new));
-        Ty::Tuple { types }
+    ".." <ty:Ty> => Ty::Tuple { elems: vec![TupleElem::Unpack(Box::new(ty))] },
+    <first:TupleElem> "," <rest:Comma<TupleElem>> => {
+        let mut elems= Vec::with_capacity(rest.len() + 1);
+        elems.push(first);
+        elems.extend(rest);
+        Ty::Tuple { elems }
     },
-    () => Ty::Tuple { types: vec![] },
+    () => Ty::Tuple { elems: vec![] },
 };
 
 RawMutability: Mutability = {

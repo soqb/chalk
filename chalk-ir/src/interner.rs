@@ -29,6 +29,9 @@ use crate::QuantifiedWhereClauses;
 use crate::SeparatorTraitRef;
 use crate::Substitution;
 use crate::TraitId;
+use crate::TupleContents;
+use crate::TupleElem;
+use crate::TupleElemData;
 use crate::Ty;
 use crate::TyData;
 use crate::VariableKind;
@@ -101,9 +104,18 @@ pub trait Interner: Debug + Copy + Eq + Hash + Sized {
     /// `Self::InternedGenericArg` is not referenced. Instead, we refer to
     /// `GenericArg<Self>`, which wraps this type.
     ///
-    /// An `InternedType` is created by `intern_generic_arg` and can be
+    /// An `InternedGenericArg` is created by `intern_generic_arg` and can be
     /// converted back to its underlying data via `generic_arg_data`.
     type InternedGenericArg: Debug + Clone + Eq + Hash;
+
+    /// "Interned" representation of a "tuple element", which can
+    /// be either variadically unpacked or inline.  In normal user code,
+    /// `Self::InternedTupleElem` is not referenced. Instead, we refer to
+    /// `TupleElem<Self>`, which wraps this type.
+    ///
+    /// An `InternedTupleElem` is created by `intern_tuple_elem` and can be
+    /// converted back to its underlying data via `tuple_elem_data`.
+    type InternedTupleElem: Debug + Clone + Eq + Hash;
 
     /// "Interned" representation of a "goal".  In normal user code,
     /// `Self::InternedGoal` is not referenced. Instead, we refer to
@@ -128,6 +140,14 @@ pub trait Interner: Debug + Copy + Eq + Hash + Sized {
     /// An `InternedSubstitution` is created by `intern_substitution` and can be
     /// converted back to its underlying data via `substitution_data`.
     type InternedSubstitution: Debug + Clone + Eq + Hash;
+
+    /// "Interned" representation of "tuple contents".  In normal user code,
+    /// `Self::InternedTupleContents` is not referenced. Instead, we refer to
+    /// `TupleContents<Self>`, which wraps this type.
+    ///
+    /// An `Internedtuple_contents` is created by `intern_tuple_contents` and can be
+    /// converted back to its underlying data via `tuple_contents_data`.
+    type InternedTupleContents: Debug + Clone + Eq + Hash;
 
     /// "Interned" representation of a list of program clauses.  In normal user code,
     /// `Self::InternedProgramClauses` is not referenced. Instead, we refer to
@@ -343,6 +363,16 @@ pub trait Interner: Debug + Copy + Eq + Hash + Sized {
         None
     }
 
+    /// Prints the debug representation of a tuple element.
+    /// Returns `None` to fallback to the default debug output.
+    #[allow(unused_variables)]
+    fn debug_tuple_elem(
+        tuple_elem: &TupleElem<Self>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Option<fmt::Result> {
+        None
+    }
+
     /// Prints the debug representation of a parameter kinds list.
     /// Returns `None` to fallback to the default debug output.
     #[allow(unused_variables)]
@@ -422,6 +452,16 @@ pub trait Interner: Debug + Copy + Eq + Hash + Sized {
     #[allow(unused_variables)]
     fn debug_substitution(
         substitution: &Substitution<Self>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Option<fmt::Result> {
+        None
+    }
+
+    /// Prints the debug representation of a TupleContents.
+    /// Returns `None` to fallback to the default debug output.
+    #[allow(unused_variables)]
+    fn debug_tuple_contents(
+        tuple_contents: &TupleContents<Self>,
         fmt: &mut fmt::Formatter<'_>,
     ) -> Option<fmt::Result> {
         None
@@ -510,6 +550,15 @@ pub trait Interner: Debug + Copy + Eq + Hash + Sized {
     /// Lookup the `LifetimeData` that was interned to create a `InternedLifetime`.
     fn generic_arg_data(self, lifetime: &Self::InternedGenericArg) -> &GenericArgData<Self>;
 
+    /// Create an "interned" parameter from `data`. This is not
+    /// normally invoked directly; instead, you invoke
+    /// `TupleElem::intern` (which will ultimately call this
+    /// method).
+    fn intern_tuple_elem(self, data: TupleElemData<Self>) -> Self::InternedTupleElem;
+
+    /// Lookup the `TupleElem` that was interned to create a `TupleElem`.
+    fn tuple_elem_data(self, lifetime: &Self::InternedTupleElem) -> &TupleElemData<Self>;
+
     /// Create an "interned" goal from `data`. This is not
     /// normally invoked directly; instead, you invoke
     /// `GoalData::intern` (which will ultimately call this
@@ -542,6 +591,18 @@ pub trait Interner: Debug + Copy + Eq + Hash + Sized {
 
     /// Lookup the `SubstitutionData` that was interned to create a `InternedSubstitution`.
     fn substitution_data(self, substitution: &Self::InternedSubstitution) -> &[GenericArg<Self>];
+
+    /// Create a set of "interned" tuple contents from `data`. This is not
+    /// normally invoked directly; instead, you invoke
+    /// `TupleContentsData::intern` (which will ultimately call this
+    /// method).
+    fn intern_tuple_contents<E>(
+        self,
+        data: impl IntoIterator<Item = Result<TupleElem<Self>, E>>,
+    ) -> Result<Self::InternedTupleContents, E>;
+
+    /// Lookup the `TupleContentsData` that was interned to create a `InternedTupleContents`.
+    fn tuple_contents_data(self, substitution: &Self::InternedTupleContents) -> &[TupleElem<Self>];
 
     /// Create an "interned" program clause from `data`. This is not
     /// normally invoked directly; instead, you invoke

@@ -64,7 +64,12 @@ where
                     (
                         TyKind::Tuple(arity_a, substitution_a),
                         TyKind::Tuple(arity_b, substitution_b),
-                    ) => arity_a == arity_b && matches(substitution_a, substitution_b),
+                    ) => {
+                        arity_a == arity_b && {
+                            // fixme: figure out could_match algo.
+                            true
+                        }
+                    }
                     (
                         TyKind::OpaqueType(opaque_ty_a, substitution_a),
                         TyKind::OpaqueType(opaque_ty_b, substitution_b),

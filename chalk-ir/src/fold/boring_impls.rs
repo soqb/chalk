@@ -91,6 +91,38 @@ impl<I: Interner> TypeFoldable<I> for Substitution<I> {
     }
 }
 
+impl<I: Interner> TypeFoldable<I> for TupleElem<I> {
+    fn try_fold_with<E>(
+        self,
+        folder: &mut dyn FallibleTypeFolder<I, Error = E>,
+        outer_binder: DebruijnIndex,
+    ) -> Result<Self, E> {
+        let interner = folder.interner();
+
+        let data = self
+            .data(interner)
+            .clone()
+            .try_fold_with(folder, outer_binder)?;
+        Ok(TupleElem::new(interner, data))
+    }
+}
+
+impl<I: Interner> TypeFoldable<I> for TupleContents<I> {
+    fn try_fold_with<E>(
+        self,
+        folder: &mut dyn FallibleTypeFolder<I, Error = E>,
+        outer_binder: DebruijnIndex,
+    ) -> Result<Self, E> {
+        let interner = folder.interner();
+
+        let folded = self
+            .iter(interner)
+            .cloned()
+            .map(|p| p.try_fold_with(folder, outer_binder));
+        TupleContents::from_fallible(interner, folded)
+    }
+}
+
 impl<I: Interner> TypeFoldable<I> for Goals<I> {
     fn try_fold_with<E>(
         self,

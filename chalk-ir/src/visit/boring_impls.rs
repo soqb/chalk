@@ -8,8 +8,8 @@ use crate::{
     try_break, AdtId, AssocTypeId, ClausePriority, ClosureId, Constraints, ControlFlow,
     CoroutineId, DebruijnIndex, FloatTy, FnDefId, ForeignDefId, GenericArg, Goals, ImplId, IntTy,
     Interner, Mutability, OpaqueTyId, PlaceholderIndex, ProgramClause, ProgramClauses,
-    QuantifiedWhereClauses, QuantifierKind, Safety, Scalar, Substitution, TraitId,
-    TypeSuperVisitable, TypeVisitable, TypeVisitor, UintTy, UniverseIndex,
+    QuantifiedWhereClauses, QuantifierKind, Safety, Scalar, Substitution, TraitId, TupleContents,
+    TupleElem, TypeSuperVisitable, TypeVisitable, TypeVisitor, UintTy, UniverseIndex,
 };
 use std::{marker::PhantomData, sync::Arc};
 
@@ -124,6 +124,28 @@ impl<I: Interner> TypeVisitable<I> for GenericArg<I> {
 }
 
 impl<I: Interner> TypeVisitable<I> for Substitution<I> {
+    fn visit_with<B>(
+        &self,
+        visitor: &mut dyn TypeVisitor<I, BreakTy = B>,
+        outer_binder: DebruijnIndex,
+    ) -> ControlFlow<B> {
+        let interner = visitor.interner();
+        visit_iter(self.iter(interner), visitor, outer_binder)
+    }
+}
+
+impl<I: Interner> TypeVisitable<I> for TupleElem<I> {
+    fn visit_with<B>(
+        &self,
+        visitor: &mut dyn TypeVisitor<I, BreakTy = B>,
+        outer_binder: DebruijnIndex,
+    ) -> ControlFlow<B> {
+        let interner = visitor.interner();
+        self.data(interner).visit_with(visitor, outer_binder)
+    }
+}
+
+impl<I: Interner> TypeVisitable<I> for TupleContents<I> {
     fn visit_with<B>(
         &self,
         visitor: &mut dyn TypeVisitor<I, BreakTy = B>,

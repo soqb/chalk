@@ -256,9 +256,9 @@ where
             }
             TyKind::Scalar(scalar) => scalar.visit_with(visitor, outer_binder),
             TyKind::Str => ControlFlow::Continue(()),
-            TyKind::Tuple(arity, substitution) => {
+            TyKind::Tuple(arity, contents) => {
                 try_break!(arity.visit_with(visitor, outer_binder));
-                substitution.visit_with(visitor, outer_binder)
+                contents.visit_with(visitor, outer_binder)
             }
             TyKind::OpaqueType(opaque_ty, substitution) => {
                 try_break!(opaque_ty.visit_with(visitor, outer_binder));

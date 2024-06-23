@@ -93,6 +93,12 @@ impl<I: Interner> Debug for GenericArg<I> {
     }
 }
 
+impl<I: Interner> Debug for TupleElem<I> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
+        I::debug_tuple_elem(self, fmt).unwrap_or_else(|| write!(fmt, "{:?}", self.interned))
+    }
+}
+
 impl<I: Interner> Debug for Goal<I> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
         I::debug_goal(self, fmt).unwrap_or_else(|| write!(fmt, "{:?}", self.interned))
@@ -509,8 +515,8 @@ impl<'a, I: Interner> Debug for TyKindDebug<'a, I> {
             }
             TyKind::Scalar(scalar) => write!(fmt, "{:?}", scalar),
             TyKind::Str => write!(fmt, "Str"),
-            TyKind::Tuple(arity, substitution) => {
-                write!(fmt, "{:?}{:?}", arity, substitution.with_angle(interner))
+            TyKind::Tuple(arity, contents) => {
+                write!(fmt, "{:?}{:?}", arity, contents)
             }
             TyKind::OpaqueType(opaque_ty, substitution) => write!(
                 fmt,
@@ -923,6 +929,15 @@ impl<'a, T: HasInterner + Display> Display for CanonicalDisplay<'a, T> {
     }
 }
 
+impl<I: Interner> Debug for TupleElemData<I> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
+        match self {
+            TupleElemData::Unpack(t) => write!(fmt, "Unpack({t:?})"),
+            TupleElemData::Inline(t) => write!(fmt, "Inline({t:?})"),
+        }
+    }
+}
+
 impl<I: Interner> Debug for GenericArgData<I> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
         match self {
@@ -1007,6 +1022,12 @@ impl<I: Interner> Substitution<I> {
 impl<I: Interner> Debug for Substitution<I> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
         Display::fmt(self, fmt)
+    }
+}
+
+impl<I: Interner> Debug for TupleContents<I> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
+        I::debug_tuple_contents(self, fmt).unwrap_or_else(|| write!(fmt, "{:?}", self.interned))
     }
 }
 

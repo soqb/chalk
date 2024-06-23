@@ -785,11 +785,11 @@ impl LowerWithEnv for Ty {
                 };
                 chalk_ir::TyKind::Function(function).intern(interner)
             }
-            Ty::Tuple { ref types } => chalk_ir::TyKind::Tuple(
-                types.len(),
-                chalk_ir::Substitution::from_fallible(
+            Ty::Tuple { ref elems } => chalk_ir::TyKind::Tuple(
+                elems.len(),
+                chalk_ir::TupleContents::from_fallible(
                     interner,
-                    types.iter().map(|t| t.lower(env)),
+                    elems.iter().map(|t| t.lower(env)),
                 )?,
             )
             .intern(interner),

@@ -593,7 +593,7 @@ pub enum TyKind<I: Interner> {
     Scalar(Scalar),
 
     /// a tuple of the given arity
-    Tuple(usize, Substitution<I>),
+    Tuple(usize, TupleContents<I>),
 
     /// an array type like `[T; N]`
     Array(Ty<I>, Const<I>),
@@ -677,6 +677,8 @@ where
     I::InternedQuantifiedWhereClauses: Copy,
     I::InternedType: Copy,
     I::InternedConst: Copy,
+    I::InternedTupleElem: Copy,
+    I::InternedTupleContents: Copy,
 {
 }
 
@@ -691,7 +693,6 @@ impl<I: Interner> TyKind<I> {
         match self {
             TyKind::Adt(_, substitution)
             | TyKind::AssociatedType(_, substitution)
-            | TyKind::Tuple(_, substitution)
             | TyKind::Closure(_, substitution)
             | TyKind::Coroutine(_, substitution)
             | TyKind::CoroutineWitness(_, substitution)
@@ -700,6 +701,7 @@ impl<I: Interner> TyKind<I> {
             TyKind::Scalar(_) | TyKind::Str | TyKind::Never | TyKind::Foreign(_) => {
                 TypeFlags::empty()
             }
+            TyKind::Tuple(_, contents) => contents.compute_flags(interner),
             TyKind::Error => TypeFlags::HAS_ERROR,
             TyKind::Slice(ty) | TyKind::Raw(_, ty) => ty.data(interner).flags,
             TyKind::Ref(_, lifetime, ty) => {
@@ -1420,6 +1422,58 @@ impl<I: Interner> VariableKind<I> {
             .intern(interner),
         }
     }
+}
+
+/// A generic argument, see `GenericArgData` for more information.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, HasInterner)]
+pub struct TupleElem<I: Interner> {
+    interned: I::InternedTupleElem,
+}
+impl<I: Interner> TupleElem<I> {
+    /// Constructs a generic argument using `GenericArgData`.
+    pub fn new(interner: I, data: TupleElemData<I>) -> Self {
+        let interned = I::intern_tuple_elem(interner, data);
+        TupleElem { interned }
+    }
+
+    /// Gets the interned value.
+    pub fn interned(&self) -> &I::InternedTupleElem {
+        &self.interned
+    }
+
+    /// Gets the underlying data.
+    pub fn data(&self, interner: I) -> &TupleElemData<I> {
+        I::tuple_elem_data(interner, &self.interned)
+    }
+
+    /// Gets the underlying ty, ignoring unpacking status.
+    pub fn ty_any(&self, interner: I) -> &Ty<I> {
+        match self.data(interner) {
+            TupleElemData::Unpack(ty) | TupleElemData::Inline(ty) => ty,
+        }
+    }
+
+    /// Checks whether the generic argument is a type.
+    pub fn is_unpacked(&self, interner: I) -> bool {
+        match self.data(interner) {
+            TupleElemData::Unpack(_) => true,
+            TupleElemData::Inline(_) => false,
+        }
+    }
+
+    /// Compute type flags for GenericArg<I>
+    fn compute_flags(&self, interner: I) -> TypeFlags {
+        self.ty_any(interner).data(interner).flags
+    }
+}
+
+/// Generic arguments data.
+#[derive(Clone, PartialEq, Eq, Hash, TypeVisitable, TypeFoldable, Zip)]
+pub enum TupleElemData<I: Interner> {
+    // A variadically unpacked tuple element `(..T)`.
+    Unpack(Ty<I>),
+    // A typical tuple element `(T,)`.
+    Inline(Ty<I>),
 }
 
 /// A generic argument, see `GenericArgData` for more information.
@@ -2717,6 +2771,17 @@ impl<I: Interner> Substitution<I> {
     }
 }
 
+impl<I: Interner> TupleContents<I> {
+    /// Compute type flags for Substitution<I>
+    fn compute_flags(&self, interner: I) -> TypeFlags {
+        let mut flags = TypeFlags::empty();
+        for elem in self.iter(interner) {
+            flags |= elem.compute_flags(interner);
+        }
+        flags
+    }
+}
+
 #[derive(FallibleTypeFolder)]
 struct SubstFolder<'i, I: Interner, A: AsParameters<I>> {
     interner: I,
@@ -2981,6 +3046,12 @@ interned_slice!(
     Substitution,
     substitution_data => GenericArg<I>,
     intern_substitution => InternedSubstitution
+);
+
+interned_slice!(
+    TupleContents,
+    tuple_contents_data => TupleElem<I>,
+    intern_tuple_contents => InternedTupleContents
 );
 
 interned_slice_common!(

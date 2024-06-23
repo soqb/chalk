@@ -290,6 +290,12 @@ pub struct AssocTyValue {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TupleElem {
+    Unpack(Box<Ty>),
+    Inline(Box<Ty>),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ty {
     Id {
         name: Identifier,
@@ -311,7 +317,7 @@ pub enum Ty {
         sig: FnSig,
     },
     Tuple {
-        types: Vec<Box<Ty>>,
+        elems: Vec<TupleElem>,
     },
     Scalar {
         ty: ScalarType,

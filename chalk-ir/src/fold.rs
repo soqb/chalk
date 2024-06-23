@@ -717,9 +717,9 @@ where
             TyKind::Scalar(scalar) => TyKind::Scalar(scalar.try_fold_with(folder, outer_binder)?)
                 .intern(folder.interner()),
             TyKind::Str => TyKind::Str.intern(folder.interner()),
-            TyKind::Tuple(arity, substitution) => TyKind::Tuple(
+            TyKind::Tuple(arity, contents) => TyKind::Tuple(
                 *arity,
-                substitution.clone().try_fold_with(folder, outer_binder)?,
+                contents.clone().try_fold_with(folder, outer_binder)?,
             )
             .intern(folder.interner()),
             TyKind::OpaqueType(opaque_ty, substitution) => TyKind::OpaqueType(
