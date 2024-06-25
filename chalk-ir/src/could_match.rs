@@ -63,7 +63,24 @@ where
                     (TyKind::Str, TyKind::Str) => true,
                     (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => {
                         // FIXME(soqb): figure out better could_match algo?
-                        arity_a == arity_b
+                        if arity_a.intersects(arity_b) {
+                            if arity_a.is_exact() && arity_b.is_exact() {
+                                contents_a
+                                    .iter(interner)
+                                    .zip(contents_b.iter(interner))
+                                    .all(|(p_a, p_b)| {
+                                        p_a.ty_inline(interner).unwrap().could_match(
+                                            interner,
+                                            self.db,
+                                            p_b.ty_inline(interner).unwrap(),
+                                        )
+                                    })
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        }
                     }
                     (
                         TyKind::OpaqueType(opaque_ty_a, substitution_a),
@@ -185,18 +202,6 @@ where
 
             fn unification_database(&self) -> &dyn UnificationDatabase<I> {
                 self.db
-            }
-
-            fn zip_tuple_contents(
-                &mut self,
-                ambient: Variance,
-                variances: Option<Variances<I>>,
-                a_arity: TupleArity,
-                b_arity: TupleArity,
-                a: &[TupleElem<I>],
-                b: &[TupleElem<I>],
-            ) -> Fallible<()> {
-                Ok(())
             }
         }
     }

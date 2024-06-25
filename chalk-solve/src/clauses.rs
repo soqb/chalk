@@ -1034,8 +1034,9 @@ fn match_ty<I: Interner>(
         TyKind::Tuple(arity, elems) => {
             // WF((T0, ..., Tn, U)) :- T0: Sized, ..., Tn: Sized, WF(T0), ..., WF(Tn), WF(U),
             //
-            // This is true whether T0 through U are unpacked or not,
-            // although for unpacked elements, we additionally impose that they implement `Tuple`.
+            // This is true whether T0 through Tn are unpacked or not,
+            // although for unpacked elements, we additionally impose that they implement `Tuple`,
+            // and if U is unpacked, it must be `Sized`.
             let interner = builder.interner();
             let binders = Binders::new(
                 VariableKinds::from_iter(
@@ -1065,23 +1066,31 @@ fn match_ty<I: Interner>(
                 );
 
                 let tuple_ty = TyKind::Tuple(*arity, contents.clone()).intern(interner);
-                println!(
-                    " >> ## >> lhs = {:?}; rhs = {:?}",
-                    ty.kind(interner),
-                    tuple_ty
-                );
                 let sized = builder.db.well_known_trait_id(WellKnownTrait::Sized);
                 let tuple = builder.db.well_known_trait_id(WellKnownTrait::Tuple);
                 builder.push_clause(
                     WellFormed::Ty(tuple_ty),
-                    contents.as_slice(interner)[..arity.element_count() - 1]
+                    contents
+                        .as_slice(interner)
                         .iter()
-                        .filter_map(|elem| {
-                            let ty_var = elem.ty_any(interner).clone();
+                        .enumerate()
+                        .filter_map(|(i, elem)| {
+                            let ty_var = match elem.data(interner) {
+                                TupleElemData::Unpack(ty) => ty,
+                                TupleElemData::Inline(_) if i == arity.element_count() - 1 => {
+                                    // If this is the last element, don't enforce the `Sized` bound.
+                                    //
+                                    // This doesn't apply (yet?) to unpacked elements,
+                                    // since they might monomorphize to a case
+                                    // with more than one type being placed in the tuple.
+                                    return None;
+                                }
+                                TupleElemData::Inline(ty) => ty,
+                            };
                             sized.map(|id| {
                                 DomainGoal::Holds(WhereClause::Implemented(TraitRef {
                                     trait_id: id,
-                                    substitution: Substitution::from1(interner, ty_var),
+                                    substitution: Substitution::from1(interner, ty_var.clone()),
                                 }))
                             })
                         })

@@ -346,3 +346,120 @@ fn tuples_implement_tuple_trait() {
         }
     }
 }
+
+#[test]
+fn variadic_tuples_are_wf() {
+    test! {
+        program {
+            #[lang(tuple_trait)]
+            trait Tuple { }
+
+            #[lang(sized)]
+            trait Sized { }
+        }
+
+        goal {
+            forall<T> { WellFormed((..T)) }
+        } yields {
+            expect![["No possible solution"]]
+        }
+
+        goal {
+            forall<T> { if (T: Sized) { WellFormed((..T)) } }
+        } yields {
+            expect![["No possible solution"]]
+        }
+
+        goal {
+            forall<T> { if (T: Tuple) { WellFormed((..T)) } }
+        } yields {
+            expect![["No possible solution"]]
+        }
+
+        goal {
+            forall<T> { if (T: Sized; T: Tuple) { WellFormed((..T)) } }
+        } yields {
+            expect![["Unique"]]
+        }
+
+        goal {
+            forall<T> { WellFormed((u8, ..T)) }
+        } yields {
+            expect![["No possible solution"]]
+        }
+
+        goal {
+            forall<T> { if (T: Sized) { WellFormed((u8, ..T)) } }
+        } yields {
+            expect![["No possible solution"]]
+        }
+
+        goal {
+            forall<T> { if (T: Tuple) { WellFormed((u8, ..T)) } }
+        } yields {
+            expect![["No possible solution"]]
+        }
+
+        goal {
+            forall<T> { if (T: Sized; T: Tuple) { WellFormed((u8, ..T)) } }
+        } yields {
+            expect![["Unique"]]
+        }
+
+        goal {
+            WellFormed((..()))
+        } yields {
+            expect![["Unique"]]
+        }
+
+        goal {
+            forall<T> { if (T: Sized) { WellFormed((u8, ..(T,))) } }
+        } yields {
+            expect![["Unique"]]
+        }
+
+        // maybe this should be automagically unpacked. if so, where?
+        goal {
+            forall<T> { WellFormed((u8, ..(T,))) }
+        } yields {
+            expect![["No possible solution"]]
+        }
+    }
+}
+
+#[test]
+fn variadic_tuples_non_overlap() {
+    test! {
+        program {
+            #[lang(tuple_trait)]
+            trait Tuple { }
+
+            #[lang(sized)]
+            trait Sized { }
+
+            trait AllTuples { }
+
+            impl AllTuples for () { }
+
+            impl<T, R> AllTuples for (T, ..R) where R: Tuple { }
+        }
+
+        goal {
+            (): AllTuples
+        } yields {
+            expect![["Unique"]]
+        }
+
+        // goal {
+        //     forall<T> { if (T: Sized) { (T,): AllTuples } }
+        // } yields {
+        //     expect![["Unique"]]
+        // }
+
+        // goal {
+        //     forall<T, R> { if (T: Sized; R: Tuple) { (T, ..R): AllTuples } }
+        // } yields {
+        //     expect![["Unique"]]
+        // }
+    }
+}

@@ -5,6 +5,7 @@ use chalk_ir::{
     ProgramClauseImplication, ProgramClauses, ProjectionTy, QuantifiedWhereClauses, Substitution,
     TraitId, Ty, VariableKinds, Variances,
 };
+use chalk_ir::{TupleContents, TupleElem};
 use std::cell::RefCell;
 use std::fmt;
 use std::sync::Arc;
@@ -76,6 +77,12 @@ pub trait DebugContext {
         fmt: &mut fmt::Formatter<'_>,
     ) -> Result<(), fmt::Error>;
 
+    fn debug_tuple_elem(
+        &self,
+        tuple_elem: &TupleElem<ChalkIr>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Result<(), fmt::Error>;
+
     fn debug_variable_kinds(
         &self,
         variable_kinds: &VariableKinds<ChalkIr>,
@@ -127,6 +134,12 @@ pub trait DebugContext {
     fn debug_substitution(
         &self,
         substitution: &Substitution<ChalkIr>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Result<(), fmt::Error>;
+
+    fn debug_tuple_contents(
+        &self,
+        tuple_contents: &TupleContents<ChalkIr>,
         fmt: &mut fmt::Formatter<'_>,
     ) -> Result<(), fmt::Error>;
 

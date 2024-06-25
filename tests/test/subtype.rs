@@ -477,7 +477,7 @@ fn generalize_tuple() {
             }
         } yields {
             // Result should be identical to generalize_covariant_struct result.
-            expect![["Unique; for<?U1> { substitution [?0 := 1<(&'^0.0 Uint(U32))>], lifetime constraints [InEnvironment { environment: Env([]), goal: '!1_0: '^0.0 }, InEnvironment { environment: Env([]), goal: '!1_1: '^0.0 }] }"]]
+            expect!["Unique; for<?U1> { substitution [?0 := (1)(Inline((&'^0.0 Uint(U32))),)], lifetime constraints [InEnvironment { environment: Env([]), goal: '!1_0: '^0.0 }, InEnvironment { environment: Env([]), goal: '!1_1: '^0.0 }] }"]
         }
         goal {
             forall<'a, 'b> {
@@ -488,7 +488,7 @@ fn generalize_tuple() {
             }
         } yields {
             // Result should be identical to generalize_covariant_struct result.
-            expect![["Unique; for<?U1> { substitution [?0 := 1<(&'^0.0 Uint(U32))>], lifetime constraints [InEnvironment { environment: Env([]), goal: '^0.0: '!1_0 }, InEnvironment { environment: Env([]), goal: '^0.0: '!1_1 }] }"]]
+            expect!["Unique; for<?U1> { substitution [?0 := (1)(Inline((&'^0.0 Uint(U32))),)], lifetime constraints [InEnvironment { environment: Env([]), goal: '^0.0: '!1_0 }, InEnvironment { environment: Env([]), goal: '^0.0: '!1_1 }] }"]
         }
     }
 }
@@ -505,7 +505,7 @@ fn generalize_2tuple() {
                 }
             }
         } yields {
-            expect![["Unique; for<?U1,?U1> { substitution [?0 := 2<(&'^0.0 Uint(U32)), (&'^0.1 Uint(U32))>], lifetime constraints [InEnvironment { environment: Env([]), goal: '!1_0: '^0.0 }, InEnvironment { environment: Env([]), goal: '!1_1: '^0.0 }, InEnvironment { environment: Env([]), goal: '!1_2: '^0.1 }, InEnvironment { environment: Env([]), goal: '!1_3: '^0.1 }] }"]]
+            expect!["Unique; for<?U1,?U1> { substitution [?0 := (2)(Inline((&'^0.0 Uint(U32))), Inline((&'^0.1 Uint(U32))))], lifetime constraints [InEnvironment { environment: Env([]), goal: '!1_0: '^0.0 }, InEnvironment { environment: Env([]), goal: '!1_1: '^0.0 }, InEnvironment { environment: Env([]), goal: '!1_2: '^0.1 }, InEnvironment { environment: Env([]), goal: '!1_3: '^0.1 }] }"]
         }
         goal {
             forall<'a, 'b, 'c, 'd> {
@@ -515,7 +515,7 @@ fn generalize_2tuple() {
                 }
             }
         } yields {
-            expect![["Unique; for<?U1,?U1> { substitution [?0 := 2<(&'^0.0 Uint(U32)), (&'^0.1 Uint(U32))>], lifetime constraints [InEnvironment { environment: Env([]), goal: '^0.0: '!1_0 }, InEnvironment { environment: Env([]), goal: '^0.0: '!1_1 }, InEnvironment { environment: Env([]), goal: '^0.1: '!1_2 }, InEnvironment { environment: Env([]), goal: '^0.1: '!1_3 }] }"]]
+            expect!["Unique; for<?U1,?U1> { substitution [?0 := (2)(Inline((&'^0.0 Uint(U32))), Inline((&'^0.1 Uint(U32))))], lifetime constraints [InEnvironment { environment: Env([]), goal: '^0.0: '!1_0 }, InEnvironment { environment: Env([]), goal: '^0.0: '!1_1 }, InEnvironment { environment: Env([]), goal: '^0.1: '!1_2 }, InEnvironment { environment: Env([]), goal: '^0.1: '!1_3 }] }"]
         }
     }
 }

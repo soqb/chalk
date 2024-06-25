@@ -1,5 +1,6 @@
 use crate::interner::ChalkIr;
 use crate::{tls, Identifier, TypeKind};
+use chalk_ir::TupleContents;
 use chalk_ir::{could_match::CouldMatch, UnificationDatabase};
 use chalk_ir::{debug::Angle, Variance};
 use chalk_ir::{
@@ -250,6 +251,15 @@ impl tls::DebugContext for Program {
         write!(fmt, "{:?}", generic_arg.data(interner).inner_debug())
     }
 
+    fn debug_tuple_elem(
+        &self,
+        tuple_elem: &chalk_ir::TupleElem<ChalkIr>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Result<(), fmt::Error> {
+        let interner = self.interner();
+        write!(fmt, "{:?}", tuple_elem.data(interner))
+    }
+
     fn debug_variable_kinds(
         &self,
         variable_kinds: &chalk_ir::VariableKinds<ChalkIr>,
@@ -329,6 +339,15 @@ impl tls::DebugContext for Program {
     ) -> Result<(), fmt::Error> {
         let interner = self.interner();
         write!(fmt, "{:?}", substitution.debug(interner))
+    }
+
+    fn debug_tuple_contents(
+        &self,
+        tuple_contents: &TupleContents<ChalkIr>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Result<(), fmt::Error> {
+        let interner = self.interner();
+        write!(fmt, "{:?}", tuple_contents.debug(interner))
     }
 
     fn debug_separator_trait_ref(

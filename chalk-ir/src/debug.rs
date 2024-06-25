@@ -202,6 +202,18 @@ impl<I: Interner> Debug for TyData<I> {
     }
 }
 
+impl Debug for TupleArity {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
+        match self {
+            TupleArity::Exact(n) => write!(fmt, "({n})"),
+            TupleArity::Inexact {
+                min_len,
+                element_count: _,
+            } => write!(fmt, "({min_len}..)"),
+        }
+    }
+}
+
 impl<I: Interner> Debug for TyKind<I> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
         match self {
@@ -219,7 +231,14 @@ impl<I: Interner> Debug for TyKind<I> {
             }
             TyKind::Scalar(scalar) => write!(fmt, "{:?}", scalar),
             TyKind::Str => write!(fmt, "Str"),
-            TyKind::Tuple(arity, substitution) => write!(fmt, "{:?}<{:?}>", arity, substitution),
+            TyKind::Tuple(arity, substitution) => {
+                if arity.is_empty() {
+                    // more friendly unit tuple debug:
+                    write!(fmt, "()")
+                } else {
+                    write!(fmt, "{:?}<{:?}>", arity, substitution)
+                }
+            }
             TyKind::OpaqueType(opaque_ty, substitution) => {
                 write!(fmt, "!{:?}<{:?}>", opaque_ty, substitution)
             }
@@ -516,7 +535,7 @@ impl<'a, I: Interner> Debug for TyKindDebug<'a, I> {
             TyKind::Scalar(scalar) => write!(fmt, "{:?}", scalar),
             TyKind::Str => write!(fmt, "Str"),
             TyKind::Tuple(arity, contents) => {
-                write!(fmt, "{:?}{:?}", arity, contents)
+                write!(fmt, "{:?}{:?}", arity, contents.debug(interner))
             }
             TyKind::OpaqueType(opaque_ty, substitution) => write!(
                 fmt,
@@ -603,6 +622,52 @@ impl<I: Interner> Substitution<I> {
     pub fn debug(&self, interner: I) -> SubstitutionDebug<'_, I> {
         SubstitutionDebug {
             substitution: self,
+            interner,
+        }
+    }
+}
+
+/// Helper struct for showing debug output for tuple contents.
+pub struct TupleContentsDebug<'a, I: Interner> {
+    tuple_contents: &'a TupleContents<I>,
+    interner: I,
+}
+
+impl<'a, I: Interner> Debug for TupleContentsDebug<'a, I> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
+        let TupleContentsDebug {
+            tuple_contents,
+            interner,
+        } = self;
+
+        write!(fmt, "(")?;
+
+        for (r_index, (l_index, value)) in tuple_contents
+            .iter(*interner)
+            .enumerate()
+            .rev()
+            .enumerate()
+            .rev()
+        {
+            write!(fmt, "{:?}", value)?;
+            if r_index != 0 {
+                write!(fmt, ", ")?;
+            } else if l_index == 0 {
+                write!(fmt, ",")?;
+            }
+        }
+
+        write!(fmt, ")")?;
+
+        Ok(())
+    }
+}
+
+impl<I: Interner> TupleContents<I> {
+    /// Show debug output for the tuple contents.
+    pub fn debug(&self, interner: I) -> TupleContentsDebug<'_, I> {
+        TupleContentsDebug {
+            tuple_contents: self,
             interner,
         }
     }

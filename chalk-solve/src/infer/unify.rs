@@ -235,15 +235,19 @@ impl<'t, I: Interner> Unifier<'t, I> {
             }
             (TyKind::Str, TyKind::Str) => Ok(()),
             (TyKind::Tuple(arity_a, contents_a), TyKind::Tuple(arity_b, contents_b)) => {
-                if arity_a.intersects(arity_b) {
+                if !arity_a.intersects(arity_b) {
                     return Err(NoSolution);
                 }
 
-                self.relate_tuple_contents(
+                let t = self.relate_tuple_contents(
                     variance.xform(Variance::Covariant),
+                    *arity_a,
+                    *arity_b,
                     contents_a.as_slice(interner),
                     contents_b.as_slice(interner),
-                )
+                );
+                debug!("tuple contents related by {t:?}");
+                t
             }
             (
                 TyKind::OpaqueType(id_a, substitution_a),
@@ -1133,19 +1137,370 @@ impl<'t, I: Interner> Unifier<'t, I> {
     fn relate_tuple_contents(
         &mut self,
         variance: Variance,
+        arity_a: TupleArity,
+        arity_b: TupleArity,
         a: &[TupleElem<I>],
         b: &[TupleElem<I>],
     ) -> Fallible<()> {
-        let interner = self.interner();
-        for (el_a, el_b) in a.iter().zip(b) {
-            match (el_a.data(interner), el_b.data(interner)) {
-                (TupleElemData::Unpack(a), TupleElemData::Unpack(b))
-                | (TupleElemData::Inline(a), TupleElemData::Inline(b)) => {
-                    self.relate_ty_ty(variance, a, b)?;
+        // FIXME(soqb): This is extremely messy. It needs major refactoring and cleanup.
+        mod combinatorics {
+            pub fn choose(n: usize, r: usize) -> usize {
+                if r > n {
+                    0
+                } else {
+                    (1..=r).fold(1, |t, term| t * (n - term + 1) / term)
                 }
-                (TupleElemData::Unpack(_), TupleElemData::Inline(_)) => return Err(NoSolution),
-                (TupleElemData::Inline(_), TupleElemData::Unpack(_)) => return Err(NoSolution),
             }
+
+            /// Computes the `i`th weak [k-composition] of `n`.
+            ///
+            /// This is a list of `k` non-negative integers, summing to `n`.
+            ///
+            /// The order of this function (as exposed by `i`) is not defined,
+            /// but is consistent within a single compilation.
+            ///
+            /// Complexity for random access of the returned iterator
+            /// scales better with larger `k` and is worst case `O(sqrt k)` (for `k` = 1).
+            ///
+            /// [k-composition]: https://en.wikipedia.org/wiki/Composition_%28combinatorics%29  
+            pub fn weak_composition(
+                i: usize,
+                n: usize,
+                k: usize,
+            ) -> impl Iterator<Item = usize> + Clone {
+                /// Iterates a strange sequence of numbers.
+                ///
+                /// The second number in the pair is the `i`th element in a sequence defined by `row`.
+                /// The sequence begins with a 0, then has 1 repeated `choose(1 + row, row)` times,
+                /// then 2 repeated `choose(2 + row, row)` times and so on.
+                ///
+                /// The first number is the number of times the result has already been repeated.
+                fn inverse_pascal_diagonal(row: usize, i: usize) -> (usize, usize) {
+                    if row == 1 {
+                        // we optimize this branches since it is `O(n)`
+                        // for the iterator below and we can do it in `O(1)`.
+                        return (0, i);
+                    }
+
+                    // for `row = 2`, this is 0,1,1,2,2,2,3,3,3,3,4...
+                    // fixme: find algorithm with better complexity than `n^(1/row)`..?
+                    (0..)
+                        .flat_map(move |r| {
+                            std::iter::repeat(r).take(choose(r + row, row)).enumerate()
+                        })
+                        .nth(i)
+                        .unwrap()
+                }
+
+                assert!(n != 0 && k != 0);
+
+                let mut quota = n;
+                let mut slots = k - 1;
+                let mut l = i;
+                std::iter::from_fn(move || {
+                    slots = slots.saturating_sub(1);
+                    let r;
+                    (l, r) = inverse_pascal_diagonal(slots, l);
+
+                    let component = quota - r;
+                    quota = r;
+
+                    Some(component)
+                })
+                .take(k)
+            }
+        }
+
+        let interner = self.interner();
+
+        debug_span!("relate_tuple_contents", ?variance, ?a, ?b);
+
+        #[derive(Clone)]
+        enum ManifElem<'a, I: Interner> {
+            Concrete(&'a Ty<I>),
+            Existential { repeat_len: usize },
+        }
+
+        fn fold_manifs<'a, 'b, I: Interner>(
+            // we reuse the same buffer for each manif since they're all the same length.
+            buf: &mut Vec<ManifElem<'a, I>>,
+            interner: I,
+            arity: TupleArity,
+            tuple: &'a [TupleElem<I>],
+            target_len: usize,
+            mut consume: impl FnMut(&[ManifElem<'a, I>]) -> Fallible<()>,
+        ) -> Fallible<()> {
+            let unpack_req = target_len - arity.min_len();
+
+            if unpack_req == 0 {
+                // we don't need to unpack anything, so we just push all the inline elements.
+                buf.clear();
+                buf.extend(
+                    tuple
+                        .iter()
+                        .filter_map(|elem| elem.ty_inline(interner))
+                        .map(ManifElem::Concrete),
+                );
+                return consume(&buf);
+            }
+
+            let unpackable_cnt = arity.element_count() - arity.min_len();
+
+            if unpackable_cnt > 20 {
+                // too complex!
+                return Err(NoSolution);
+            }
+
+            let manif_cnt =
+                combinatorics::choose((unpackable_cnt + unpack_req).saturating_sub(1), unpack_req);
+
+            for i in 0..manif_cnt {
+                buf.clear();
+
+                let mut composition =
+                    combinatorics::weak_composition(i, unpack_req, unpackable_cnt);
+
+                buf.clear();
+                for elem in tuple.iter() {
+                    match elem.data(interner) {
+                        TupleElemData::Unpack(_) => {
+                            let repeat_len = composition.next().unwrap();
+                            // buf.push(ManifElem::Existential { repeat_len });
+                            buf.extend(
+                                std::iter::repeat(ManifElem::Existential { repeat_len: 1 })
+                                    .take(repeat_len),
+                            );
+                        }
+                        TupleElemData::Inline(ty) => {
+                            buf.push(ManifElem::Concrete(ty));
+                        }
+                    }
+                }
+
+                match consume(&buf) {
+                    Ok(_) => return Ok(()),
+                    Err(_) => (),
+                };
+            }
+
+            Ok(())
+        }
+
+        fn dbg_manif<'a, I: Interner>(
+            manif: &'a [ManifElem<'a, I>],
+            interner: I,
+        ) -> impl std::fmt::Debug + 'a {
+            struct ManifDebug<'a, I: Interner> {
+                manif: &'a [ManifElem<'a, I>],
+                interner: I,
+            }
+
+            impl<'a, I: Interner> std::fmt::Debug for ManifDebug<'a, I> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    let interner = self.interner;
+                    write!(f, "(")?;
+
+                    for (i, el) in self.manif.iter().enumerate() {
+                        match el {
+                            ManifElem::Concrete(ty) => {
+                                write!(f, "{:?}", ty.kind(interner).debug(interner))?
+                            }
+                            ManifElem::Existential { repeat_len: 0 } => continue,
+                            ManifElem::Existential { repeat_len } => {
+                                write!(f, "{}_", "_, ".repeat(repeat_len - 1))?
+                            }
+                        }
+
+                        if i < self.manif.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+
+                    write!(f, ")")
+                }
+            }
+
+            ManifDebug { manif, interner }
+        }
+
+        let len_range = match arity_a.intersection(arity_b) {
+            Some(TupleArity::Exact(n)) => n..=n,
+            Some(TupleArity::Inexact { min_len, .. }) => {
+                // FIXME(soqb): these docs are hopelessly vague.
+                //
+                // We only need to check these ranges to know how types are related.
+                // there's a good *intuition* for why this is when thinking about how manifs
+                // "fall over" eachother, but we haven't found a proof.
+                //
+                // Beyond this upper bound,
+                // there's no index that a `ManifElem::Existential` could be inserted
+                // which where a `ManifElem::Existential` wouldn't be in the other manif,
+                // resulting in a redundant check.
+                min_len..=arity_a.min_len() + arity_b.min_len()
+            }
+            None => unreachable!("tried to relate two non-overlapping tuples"),
+        };
+
+        let (mut buf_a, mut buf_b) = (
+            Vec::with_capacity(*len_range.end()),
+            Vec::with_capacity(*len_range.end()),
+        );
+        for len in len_range {
+            fold_manifs(&mut buf_a, interner, arity_a, a, len, |manif_a| {
+                fold_manifs(&mut buf_b, interner, arity_b, b, len, |manif_b| {
+                    debug_span!(
+                        "comparing_manifs",
+                        "\na = {:?}\nb = {:?}",
+                        dbg_manif(manif_a, interner),
+                        dbg_manif(manif_b, interner)
+                    );
+
+                    // enum UnpackedManifElem<'a, I: Interner> {
+                    //     Concrete(&'a Ty<I>),
+                    //     Unpacked { parent_idx: usize },
+                    // }
+
+                    // fn close<'a, 'b, I: Interner>(
+                    //     manif: &'b [ManifElem<'a, I>],
+                    // ) -> impl FnMut() -> Option<UnpackedManifElem<'a, I>> + 'b {
+                    //     let mut repeats = 0;
+                    //     let mut idx = 0;
+                    //     let mut iter = manif.iter();
+                    //     move || loop {
+                    //         if repeats > 0 {
+                    //             repeats -= 1;
+                    //             break Some(UnpackedManifElem::Unpacked {
+                    //                 parent_idx: idx - 1,
+                    //             });
+                    //         } else {
+                    //             match iter.next() {
+                    //                 Some(ManifElem::Existential { repeat_len }) => {
+                    //                     idx += 1;
+                    //                     repeats += repeat_len;
+                    //                 }
+                    //                 Some(ManifElem::Concrete(ty)) => {
+                    //                     break Some(UnpackedManifElem::Concrete(ty));
+                    //                 }
+                    //                 None => break None,
+                    //             }
+                    //         }
+                    //     }
+                    // }
+
+                    // struct CollectionState<'a, I: Interner> {
+                    //     finished: bool,
+                    //     element_idx: usize,
+                    //     elements: Vec<&'a Ty<I>>,
+                    // }
+
+                    // impl<'a, I: Interner> Default for CollectionState<'a, I> {
+                    //     fn default() -> Self {
+                    //         Self {
+                    //             finished: true,
+                    //             element_idx: 0,
+                    //             elements: Vec::default(),
+                    //         }
+                    //     }
+                    // }
+
+                    // let mut close_a = close(manif_a);
+                    // let mut close_b = close(manif_b);
+                    // let mut tuple_a = CollectionState::default();
+                    // let mut tuple_b = CollectionState::default();
+                    // loop {
+                    //     let elem_a = close_a();
+                    //     let elem_b = close_b();
+
+                    //     if !tuple_a.finished
+                    //         && !matches!(elem_a, Some(UnpackedManifElem::Unpacked { parent_idx }) if parent_idx == tuple_a.element_idx)
+                    //     {
+                    //         tuple_a.finished = true;
+                    //         let tuple =
+                    //             TyKind::new_tuple_exact(interner, tuple_a.elements.drain(..));
+                    //         match self.relate_ty_ty(
+                    //             variance.invert(),
+                    //             &tuple,
+                    //             &a[tuple_a.element_idx].ty_inline(interner).unwrap(),
+                    //         ) {
+                    //             Ok(_) => break Ok(()),
+                    //             Err(_) => (),
+                    //         }
+
+                    //         tuple_a = CollectionState::default();
+                    //     } else if !tuple_b.finished
+                    //         && !matches!(elem_b, Some(UnpackedManifElem::Unpacked { parent_idx }) if parent_idx == tuple_b.element_idx)
+                    //     {
+                    //         tuple_b.finished = true;
+                    //         let tuple =
+                    //             TyKind::new_tuple_exact(interner, tuple_b.elements.drain(..));
+                    //         match self.relate_ty_ty(
+                    //             variance,
+                    //             &tuple,
+                    //             &b[tuple_b.element_idx].ty_inline(interner).unwrap(),
+                    //         ) {
+                    //             Ok(_) => break Ok(()),
+                    //             Err(_) => (),
+                    //         }
+
+                    //         tuple_b = CollectionState::default();
+                    //     }
+
+                    //     let result = match (close_a(), close_b()) {
+                    //         (None, None) => break Err(NoSolution),
+                    //         (None, _) | (_, None) => panic!("manif length mismatch!"),
+                    //         (
+                    //             Some(UnpackedManifElem::Concrete(a)),
+                    //             Some(UnpackedManifElem::Concrete(b)),
+                    //         ) => self.relate_ty_ty(variance, a, b),
+                    //         (
+                    //             Some(UnpackedManifElem::Unpacked { .. }),
+                    //             Some(UnpackedManifElem::Unpacked { .. }),
+                    //         ) => continue,
+                    //         (
+                    //             Some(UnpackedManifElem::Unpacked { parent_idx }),
+                    //             Some(UnpackedManifElem::Concrete(ty)),
+                    //         ) => {
+                    //             tuple_a.finished = false;
+                    //             tuple_a.element_idx = parent_idx;
+                    //             tuple_a.elements.push(ty);
+
+                    //             Err(NoSolution)
+                    //         }
+                    //         (
+                    //             Some(UnpackedManifElem::Concrete(ty)),
+                    //             Some(UnpackedManifElem::Unpacked { parent_idx }),
+                    //         ) => {
+                    //             tuple_b.finished = false;
+                    //             tuple_b.element_idx = parent_idx;
+                    //             tuple_b.elements.push(ty);
+
+                    //             Err(NoSolution)
+                    //         }
+                    //     };
+
+                    //     match result {
+                    //         Ok(_) => break Ok(()),
+                    //         Err(_) => continue,
+                    //     }
+                    // }
+
+                    for (a, b) in manif_a.iter().zip(manif_b) {
+                        let related = match (a, b) {
+                            (ManifElem::Concrete(a), ManifElem::Concrete(b)) => {
+                                self.relate_ty_ty(variance, a, b)
+                            }
+                            (ManifElem::Existential { .. }, _)
+                            | (_, ManifElem::Existential { .. }) => Ok(()),
+                        };
+
+                        if related.is_ok() {
+                            return Ok(());
+                        }
+                    }
+
+                    Err(NoSolution)
+                })
+            })?;
         }
 
         Ok(())
@@ -1227,18 +1582,6 @@ impl<'i, I: Interner> Zipper<I> for Unifier<'i, I> {
 
     fn zip_consts(&mut self, variance: Variance, a: &Const<I>, b: &Const<I>) -> Fallible<()> {
         self.relate_const_const(variance, a, b)
-    }
-
-    fn zip_tuple_contents(
-        &mut self,
-        ambient: Variance,
-        _variances: Option<Variances<I>>,
-        _a_arity: TupleArity,
-        _b_arity: TupleArity,
-        a: &[TupleElem<I>],
-        b: &[TupleElem<I>],
-    ) -> Fallible<()> {
-        self.relate_tuple_contents(ambient, a, b)
     }
 
     fn zip_binders<T>(&mut self, variance: Variance, a: &Binders<T>, b: &Binders<T>) -> Fallible<()>

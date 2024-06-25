@@ -467,14 +467,23 @@ impl<'i, I: Interner> Zipper<I> for AnswerSubstitutor<'i, I> {
                 if arity_a != arity_b {
                     return Err(NoSolution);
                 }
-                self.zip_tuple_contents(
-                    variance,
-                    None,
-                    *arity_a,
-                    *arity_b,
-                    contents_a.as_slice(interner),
-                    contents_b.as_slice(interner),
-                )
+
+                for (a_elem, b_elem) in contents_a.iter(interner).zip(contents_b.iter(interner)) {
+                    match (a_elem.data(interner), b_elem.data(interner)) {
+                        (TupleElemData::Unpack(a), TupleElemData::Unpack(b))
+                        | (TupleElemData::Inline(a), TupleElemData::Inline(b)) => {
+                            self.zip_tys(variance, a, b)?;
+                        }
+                        (TupleElemData::Unpack(_), TupleElemData::Inline(_)) => {
+                            return Err(NoSolution)
+                        }
+                        (TupleElemData::Inline(_), TupleElemData::Unpack(_)) => {
+                            return Err(NoSolution)
+                        }
+                    }
+                }
+
+                Ok(())
             }
             (
                 TyKind::OpaqueType(id_a, substitution_a),
@@ -728,29 +737,5 @@ impl<'i, I: Interner> Zipper<I> for AnswerSubstitutor<'i, I> {
 
     fn unification_database(&self) -> &dyn UnificationDatabase<I> {
         self.unification_database
-    }
-
-    fn zip_tuple_contents(
-        &mut self,
-        variance: Variance,
-        _variances: Option<Variances<I>>,
-        _a_arity: TupleArity,
-        _b_arity: TupleArity,
-        a: &[TupleElem<I>],
-        b: &[TupleElem<I>],
-    ) -> Fallible<()> {
-        let interner = self.interner();
-        for (el_a, el_b) in a.iter().zip(b) {
-            match (el_a.data(interner), el_b.data(interner)) {
-                (TupleElemData::Unpack(a), TupleElemData::Unpack(b))
-                | (TupleElemData::Inline(a), TupleElemData::Inline(b)) => {
-                    self.zip_tys(variance, a, b)?;
-                }
-                (TupleElemData::Unpack(_), TupleElemData::Inline(_)) => return Err(NoSolution),
-                (TupleElemData::Inline(_), TupleElemData::Unpack(_)) => return Err(NoSolution),
-            }
-        }
-
-        Ok(())
     }
 }

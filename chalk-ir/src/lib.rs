@@ -299,7 +299,7 @@ pub enum Mutability {
 }
 
 /// The length ("arity") of a tuple.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TupleArity {
     /// The tuple has exactly this length.
     Exact(usize),
@@ -326,6 +326,11 @@ impl TupleArity {
     /// Returns whether the represented tuple has exactly the length specified.
     pub fn is_exactly(&self, len: usize) -> bool {
         matches!(self, TupleArity::Exact(lhs) if *lhs == len)
+    }
+
+    /// Returns whether the represented tuple is free of unpacked elements.
+    pub fn is_exact(&self) -> bool {
+        matches!(self, TupleArity::Exact(_))
     }
 
     /// Returns the minimum length intersecting with this arity.
@@ -837,6 +842,16 @@ impl<I: Interner> TyKind<I> {
     /// Creates and interns a new empty tuple type.
     pub fn unit_tuple(interner: I) -> Ty<I> {
         TyKind::Tuple(TupleArity::Exact(0), TupleContents::empty(interner)).intern(interner)
+    }
+
+    /// Creates and interns a new tuple with exactly the elements specified.
+    pub fn new_tuple_exact(
+        interner: I,
+        contents: impl Iterator<Item = impl CastTo<Ty<I>>>,
+    ) -> Ty<I> {
+        let contents =
+            TupleContents::from_iter(interner, contents.map(|elem| elem.cast_to(interner)));
+        TyKind::Tuple(TupleArity::Exact(contents.len(interner)), contents).intern(interner)
     }
 }
 

@@ -824,7 +824,7 @@ fn env_bound_vars() {
                 }
             }
         } yields {
-            expect![["Unique; for<?U0> { substitution [?0 := '^0.0], lifetime constraints [InEnvironment { environment: Env([]), goal: 0: '^0.0 }] }"]]
+            expect!["Unique; for<?U0> { substitution [?0 := '^0.0], lifetime constraints [InEnvironment { environment: Env([]), goal: (0)(): '^0.0 }] }"]
         }
     }
 }
