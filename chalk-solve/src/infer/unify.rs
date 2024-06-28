@@ -6,6 +6,7 @@ use chalk_ir::fold::{FallibleTypeFolder, TypeFoldable};
 use chalk_ir::interner::{HasInterner, Interner};
 use chalk_ir::zip::{Zip, Zipper};
 use chalk_ir::UnificationDatabase;
+use std::borrow::Cow;
 use std::fmt::Debug;
 use tracing::{debug, instrument};
 
@@ -1143,6 +1144,7 @@ impl<'t, I: Interner> Unifier<'t, I> {
         b: &[TupleElem<I>],
     ) -> Fallible<()> {
         // FIXME(soqb): This is extremely messy. It needs major refactoring and cleanup.
+        // To be quite honest even I don't really have much of an idea of how all this works, but it seems to.
         mod combinatorics {
             pub fn choose(n: usize, r: usize) -> usize {
                 if r > n {
@@ -1215,16 +1217,18 @@ impl<'t, I: Interner> Unifier<'t, I> {
 
         debug_span!("relate_tuple_contents", ?variance, ?a, ?b);
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         enum ManifElem<'a, I: Interner> {
             Concrete(&'a Ty<I>),
             Existential { repeat_len: usize },
         }
 
+        // this function has *way* too many parameters.
         fn fold_manifs<'a, 'b, I: Interner>(
             // we reuse the same buffer for each manif since they're all the same length.
             buf: &mut Vec<ManifElem<'a, I>>,
             interner: I,
+            variance: Variance,
             arity: TupleArity,
             tuple: &'a [TupleElem<I>],
             target_len: usize,
@@ -1235,12 +1239,11 @@ impl<'t, I: Interner> Unifier<'t, I> {
             if unpack_req == 0 {
                 // we don't need to unpack anything, so we just push all the inline elements.
                 buf.clear();
-                buf.extend(
-                    tuple
-                        .iter()
-                        .filter_map(|elem| elem.ty_inline(interner))
-                        .map(ManifElem::Concrete),
-                );
+                buf.extend(tuple.iter().map(|elem| match elem.data(interner) {
+                    TupleElemData::Unpack(_) => ManifElem::Existential { repeat_len: 0 },
+                    TupleElemData::Inline(ty) => ManifElem::Concrete(ty),
+                }));
+
                 return consume(&buf);
             }
 
@@ -1253,6 +1256,7 @@ impl<'t, I: Interner> Unifier<'t, I> {
 
             let manif_cnt =
                 combinatorics::choose((unpackable_cnt + unpack_req).saturating_sub(1), unpack_req);
+            assert_ne!(manif_cnt, 0, "there should be at least one manif.");
 
             for i in 0..manif_cnt {
                 buf.clear();
@@ -1265,11 +1269,7 @@ impl<'t, I: Interner> Unifier<'t, I> {
                     match elem.data(interner) {
                         TupleElemData::Unpack(_) => {
                             let repeat_len = composition.next().unwrap();
-                            // buf.push(ManifElem::Existential { repeat_len });
-                            buf.extend(
-                                std::iter::repeat(ManifElem::Existential { repeat_len: 1 })
-                                    .take(repeat_len),
-                            );
+                            buf.push(ManifElem::Existential { repeat_len });
                         }
                         TupleElemData::Inline(ty) => {
                             buf.push(ManifElem::Concrete(ty));
@@ -1277,13 +1277,24 @@ impl<'t, I: Interner> Unifier<'t, I> {
                     }
                 }
 
-                match consume(&buf) {
-                    Ok(_) => return Ok(()),
-                    Err(_) => (),
-                };
+                let r = consume(&buf);
+                debug!("manif comparison relation: {:?}", r);
+
+                match (variance, r) {
+                    // for checking type equality, we want *every* manif to be able to match,
+                    // otherwise they're not the same type.
+                    (Variance::Invariant, Ok(_)) => continue,
+                    (Variance::Invariant, Err(_)) => return Err(NoSolution),
+                    // however, for subtyping, a single overlap is enough to draw a conclusion.
+                    (Variance::Covariant | Variance::Contravariant, Ok(_)) => return Ok(()),
+                    (Variance::Covariant | Variance::Contravariant, Err(_)) => continue,
+                }
             }
 
-            Ok(())
+            match variance {
+                Variance::Invariant => Ok(()),
+                Variance::Contravariant | Variance::Covariant => Err(NoSolution),
+            }
         }
 
         fn dbg_manif<'a, I: Interner>(
@@ -1326,7 +1337,7 @@ impl<'t, I: Interner> Unifier<'t, I> {
         let len_range = match arity_a.intersection(arity_b) {
             Some(TupleArity::Exact(n)) => n..=n,
             Some(TupleArity::Inexact { min_len, .. }) => {
-                // FIXME(soqb): these docs are hopelessly vague.
+                // FIXME(soqb): These docs are hopelessly vague.
                 //
                 // We only need to check these ranges to know how types are related.
                 // there's a good *intuition* for why this is when thinking about how manifs
@@ -1342,163 +1353,196 @@ impl<'t, I: Interner> Unifier<'t, I> {
         };
 
         let (mut buf_a, mut buf_b) = (
-            Vec::with_capacity(*len_range.end()),
-            Vec::with_capacity(*len_range.end()),
+            Vec::with_capacity(arity_a.element_count()),
+            Vec::with_capacity(arity_b.element_count()),
         );
         for len in len_range {
-            fold_manifs(&mut buf_a, interner, arity_a, a, len, |manif_a| {
-                fold_manifs(&mut buf_b, interner, arity_b, b, len, |manif_b| {
+            fold_manifs(&mut buf_a, interner, variance, arity_a, a, len, |manif_a| {
+                fold_manifs(&mut buf_b, interner, variance, arity_b, b, len, |manif_b| {
                     debug_span!(
                         "comparing_manifs",
-                        "\na = {:?}\nb = {:?}",
+                        "{:?}; {:?}\na = {:?}\nb = {:?}",
+                        manif_a,
+                        manif_b,
                         dbg_manif(manif_a, interner),
                         dbg_manif(manif_b, interner)
                     );
 
-                    // enum UnpackedManifElem<'a, I: Interner> {
-                    //     Concrete(&'a Ty<I>),
-                    //     Unpacked { parent_idx: usize },
-                    // }
+                    // FIXME(soqb): This is where the disgusting spaghetti really begins.
+                    enum ManifUnpack<'a, I: Interner> {
+                        Concrete(&'a Ty<I>),
+                        SingalUnpackedStart { parent_idx: usize },
+                        ContinueUnpacking,
+                    }
 
-                    // fn close<'a, 'b, I: Interner>(
-                    //     manif: &'b [ManifElem<'a, I>],
-                    // ) -> impl FnMut() -> Option<UnpackedManifElem<'a, I>> + 'b {
-                    //     let mut repeats = 0;
-                    //     let mut idx = 0;
-                    //     let mut iter = manif.iter();
-                    //     move || loop {
-                    //         if repeats > 0 {
-                    //             repeats -= 1;
-                    //             break Some(UnpackedManifElem::Unpacked {
-                    //                 parent_idx: idx - 1,
-                    //             });
-                    //         } else {
-                    //             match iter.next() {
-                    //                 Some(ManifElem::Existential { repeat_len }) => {
-                    //                     idx += 1;
-                    //                     repeats += repeat_len;
-                    //                 }
-                    //                 Some(ManifElem::Concrete(ty)) => {
-                    //                     break Some(UnpackedManifElem::Concrete(ty));
-                    //                 }
-                    //                 None => break None,
-                    //             }
-                    //         }
-                    //     }
-                    // }
-
-                    // struct CollectionState<'a, I: Interner> {
-                    //     finished: bool,
-                    //     element_idx: usize,
-                    //     elements: Vec<&'a Ty<I>>,
-                    // }
-
-                    // impl<'a, I: Interner> Default for CollectionState<'a, I> {
-                    //     fn default() -> Self {
-                    //         Self {
-                    //             finished: true,
-                    //             element_idx: 0,
-                    //             elements: Vec::default(),
-                    //         }
-                    //     }
-                    // }
-
-                    // let mut close_a = close(manif_a);
-                    // let mut close_b = close(manif_b);
-                    // let mut tuple_a = CollectionState::default();
-                    // let mut tuple_b = CollectionState::default();
-                    // loop {
-                    //     let elem_a = close_a();
-                    //     let elem_b = close_b();
-
-                    //     if !tuple_a.finished
-                    //         && !matches!(elem_a, Some(UnpackedManifElem::Unpacked { parent_idx }) if parent_idx == tuple_a.element_idx)
-                    //     {
-                    //         tuple_a.finished = true;
-                    //         let tuple =
-                    //             TyKind::new_tuple_exact(interner, tuple_a.elements.drain(..));
-                    //         match self.relate_ty_ty(
-                    //             variance.invert(),
-                    //             &tuple,
-                    //             &a[tuple_a.element_idx].ty_inline(interner).unwrap(),
-                    //         ) {
-                    //             Ok(_) => break Ok(()),
-                    //             Err(_) => (),
-                    //         }
-
-                    //         tuple_a = CollectionState::default();
-                    //     } else if !tuple_b.finished
-                    //         && !matches!(elem_b, Some(UnpackedManifElem::Unpacked { parent_idx }) if parent_idx == tuple_b.element_idx)
-                    //     {
-                    //         tuple_b.finished = true;
-                    //         let tuple =
-                    //             TyKind::new_tuple_exact(interner, tuple_b.elements.drain(..));
-                    //         match self.relate_ty_ty(
-                    //             variance,
-                    //             &tuple,
-                    //             &b[tuple_b.element_idx].ty_inline(interner).unwrap(),
-                    //         ) {
-                    //             Ok(_) => break Ok(()),
-                    //             Err(_) => (),
-                    //         }
-
-                    //         tuple_b = CollectionState::default();
-                    //     }
-
-                    //     let result = match (close_a(), close_b()) {
-                    //         (None, None) => break Err(NoSolution),
-                    //         (None, _) | (_, None) => panic!("manif length mismatch!"),
-                    //         (
-                    //             Some(UnpackedManifElem::Concrete(a)),
-                    //             Some(UnpackedManifElem::Concrete(b)),
-                    //         ) => self.relate_ty_ty(variance, a, b),
-                    //         (
-                    //             Some(UnpackedManifElem::Unpacked { .. }),
-                    //             Some(UnpackedManifElem::Unpacked { .. }),
-                    //         ) => continue,
-                    //         (
-                    //             Some(UnpackedManifElem::Unpacked { parent_idx }),
-                    //             Some(UnpackedManifElem::Concrete(ty)),
-                    //         ) => {
-                    //             tuple_a.finished = false;
-                    //             tuple_a.element_idx = parent_idx;
-                    //             tuple_a.elements.push(ty);
-
-                    //             Err(NoSolution)
-                    //         }
-                    //         (
-                    //             Some(UnpackedManifElem::Concrete(ty)),
-                    //             Some(UnpackedManifElem::Unpacked { parent_idx }),
-                    //         ) => {
-                    //             tuple_b.finished = false;
-                    //             tuple_b.element_idx = parent_idx;
-                    //             tuple_b.elements.push(ty);
-
-                    //             Err(NoSolution)
-                    //         }
-                    //     };
-
-                    //     match result {
-                    //         Ok(_) => break Ok(()),
-                    //         Err(_) => continue,
-                    //     }
-                    // }
-
-                    for (a, b) in manif_a.iter().zip(manif_b) {
-                        let related = match (a, b) {
-                            (ManifElem::Concrete(a), ManifElem::Concrete(b)) => {
-                                self.relate_ty_ty(variance, a, b)
+                    fn close<'a, 'b, I: Interner>(
+                        manif: &'b [ManifElem<'a, I>],
+                    ) -> impl FnMut() -> Option<ManifUnpack<'a, I>> + 'b {
+                        let mut repeats = 0;
+                        let mut iter = manif.iter().enumerate();
+                        move || {
+                            if repeats > 0 {
+                                repeats -= 1;
+                                return Some(ManifUnpack::ContinueUnpacking);
                             }
-                            (ManifElem::Existential { .. }, _)
-                            | (_, ManifElem::Existential { .. }) => Ok(()),
-                        };
 
-                        if related.is_ok() {
-                            return Ok(());
+                            match iter.next()? {
+                                (parent_idx, &ManifElem::Existential { repeat_len }) => {
+                                    repeats = repeat_len;
+                                    Some(ManifUnpack::SingalUnpackedStart { parent_idx })
+                                }
+                                (_, ManifElem::Concrete(ty)) => Some(ManifUnpack::Concrete(ty)),
+                            }
                         }
                     }
 
-                    Err(NoSolution)
+                    /// I am insane. I am insane. I am insane.
+                    struct RelationStation<'a, I: Interner> {
+                        finished: bool,
+                        element_idx: usize,
+                        elements: Vec<Cow<'a, Ty<I>>>,
+                        manif: &'a [ManifElem<'a, I>],
+                        tuple: &'a [TupleElem<I>],
+                    }
+
+                    impl<'a, I: Interner> RelationStation<'a, I> {
+                        fn new(tuple: &'a [TupleElem<I>], manif: &'a [ManifElem<'a, I>]) -> Self {
+                            Self {
+                                finished: true,
+                                element_idx: 0,
+                                manif,
+                                tuple,
+                                elements: Vec::with_capacity(manif.len()),
+                            }
+                        }
+
+                        fn update(
+                            &mut self,
+                            interner: I,
+                            elem: Option<&ManifUnpack<'a, I>>,
+                        ) -> Option<(Ty<I>, &'a Ty<I>)> {
+                            if self.finished || matches!(elem, Some(ManifUnpack::ContinueUnpacking))
+                            {
+                                return None;
+                            }
+
+                            self.finished = true;
+                            let tuple = TyKind::new_tuple_exact(interner, self.elements.drain(..));
+                            let borrowed =
+                                self.tuple[self.element_idx].ty_unpacked(interner).unwrap();
+                            debug_span!(
+                                "forming_tuple_a",
+                                "idx = {}; {:?} against {:?}",
+                                self.element_idx,
+                                tuple.kind(interner).debug(interner),
+                                borrowed.kind(interner).debug(interner),
+                            );
+
+                            Some((tuple, borrowed))
+                            // self
+                            //     .relate_ty_ty(
+                            //         variance.invert(),
+                            //         &tuple,
+                            //         &self.manif[self.element_idx]
+                            //             .ty_unpacked(interner)
+                            //             .unwrap(),
+                            //     )
+                            //     .is_ok();
+
+                            // self = RelationStation::default();
+                        }
+                    }
+
+                    let snapshot = self.table.snapshot();
+
+                    let mut close_a = close(manif_a);
+                    let mut close_b = close(manif_b);
+                    let mut station_a = RelationStation::new(a, manif_a);
+                    let mut station_b = RelationStation::new(b, manif_b);
+                    let mut elem_a = close_a();
+                    let mut elem_b = close_b();
+                    loop {
+                        if let Some((tuple, borrowed_ty)) =
+                            station_a.update(interner, elem_a.as_ref())
+                        {
+                            // ignoring the result here feels wrong (unsound?).
+                            // we only really care about the effects on inference.
+                            let _ = self.relate_ty_ty(variance.invert(), &tuple, borrowed_ty);
+                        }
+                        if let Some((tuple, borrowed_ty)) =
+                            station_b.update(interner, elem_b.as_ref())
+                        {
+                            // ignoring the result here feels wrong (unsound?).
+                            // we only really care about the effects on inference.
+                            let _ = self.relate_ty_ty(variance, &tuple, borrowed_ty);
+                        }
+
+                        if let Some(ManifUnpack::SingalUnpackedStart { parent_idx }) = elem_a {
+                            station_a.finished = false;
+                            station_a.element_idx = parent_idx;
+                            elem_a = close_a();
+                            continue;
+                        }
+
+                        if let Some(ManifUnpack::SingalUnpackedStart { parent_idx }) = elem_b {
+                            if !station_a.finished {
+                                let unpacking_atom = self
+                                    .table
+                                    .new_variable(self.table.max_universe)
+                                    .to_ty(interner);
+                                station_b.elements.push(unpacking_atom);
+                            }
+
+                            station_b.finished = false;
+                            station_b.element_idx = parent_idx;
+                            elem_b = close_b();
+                            continue;
+                        }
+
+                        match (elem_a, elem_b) {
+                            (None, None) => break,
+                            (None, _) | (_, None) => panic!("manif length mismatch!"),
+                            (Some(ManifUnpack::Concrete(a)), Some(ManifUnpack::Concrete(b))) => {
+                                match self.relate_ty_ty(variance, a, b) {
+                                    Ok(_) => (),
+                                    Err(NoSolution) => {
+                                        self.table.rollback_to(snapshot);
+                                        return Err(NoSolution);
+                                    }
+                                }
+                            }
+                            (
+                                Some(ManifUnpack::ContinueUnpacking),
+                                Some(ManifUnpack::ContinueUnpacking),
+                            ) => (),
+                            (
+                                Some(ManifUnpack::ContinueUnpacking),
+                                Some(ManifUnpack::Concrete(ty)),
+                            ) => {
+                                station_a.elements.push(ty);
+                            }
+                            (
+                                Some(ManifUnpack::Concrete(ty)),
+                                Some(ManifUnpack::ContinueUnpacking),
+                            ) => {
+                                station_b.elements.push(ty);
+                            }
+                            (Some(ManifUnpack::SingalUnpackedStart { .. }), _)
+                            | (_, Some(ManifUnpack::SingalUnpackedStart { .. })) => {
+                                unreachable!("handled above")
+                            }
+                        }
+
+                        elem_a = close_a();
+                        elem_b = close_b();
+                    }
+
+                    // fixme: we're wasting loads of work here.
+                    if variance == Variance::Invariant {
+                        self.table.rollback_to(snapshot);
+                    }
+
+                    Ok(())
                 })
             })?;
         }
