@@ -6,8 +6,8 @@ use chalk_ir::fold::{FallibleTypeFolder, TypeFoldable};
 use chalk_ir::interner::{HasInterner, Interner};
 use chalk_ir::zip::{Zip, Zipper};
 use chalk_ir::UnificationDatabase;
-use std::borrow::Cow;
 use std::fmt::Debug;
+use std::mem::{swap, take};
 use tracing::{debug, instrument};
 
 impl<I: Interner> InferenceTable<I> {
@@ -523,11 +523,9 @@ impl<'t, I: Interner> Unifier<'t, I> {
             .intern(interner),
             TyKind::Scalar(scalar) => TyKind::Scalar(*scalar).intern(interner),
             TyKind::Str => TyKind::Str.intern(interner),
-            TyKind::Tuple(arity, contents) => TyKind::Tuple(
-                *arity,
-                self.generalize_tuple_contents(contents, universe_index, |_| variance),
-            )
-            .intern(interner),
+            TyKind::Tuple(arity, contents) => {
+                self.generalize_tuple_contents(*arity, contents, universe_index, |_| variance)
+            }
             TyKind::OpaqueType(id, substitution) => TyKind::OpaqueType(
                 *id,
                 self.generalize_substitution(substitution, universe_index, |_| variance),
@@ -838,10 +836,11 @@ impl<'t, I: Interner> Unifier<'t, I> {
     #[instrument(level = "debug", skip(self, get_variance))]
     fn generalize_tuple_contents<F: Fn(usize) -> Variance>(
         &mut self,
+        arity: TupleArity,
         tuple_contents: &TupleContents<I>,
         universe_index: UniverseIndex,
         get_variance: F,
-    ) -> TupleContents<I> {
+    ) -> Ty<I> {
         let interner = self.interner;
         let vars = tuple_contents
             .iter(interner)
@@ -854,8 +853,7 @@ impl<'t, I: Interner> Unifier<'t, I> {
                     TupleElemData::Inline(_) => TupleElemData::Inline(ty).intern(interner),
                 }
             });
-
-        TupleContents::from_iter(interner, vars)
+        TyKind::Tuple(arity, TupleContents::from_iter(interner, vars)).intern(interner)
     }
 
     /// Unify an inference variable `var` with some non-inference
@@ -1137,417 +1135,505 @@ impl<'t, I: Interner> Unifier<'t, I> {
 
     fn relate_tuple_contents(
         &mut self,
-        variance: Variance,
+        mut variance: Variance,
         arity_a: TupleArity,
         arity_b: TupleArity,
         a: &[TupleElem<I>],
         b: &[TupleElem<I>],
     ) -> Fallible<()> {
-        // FIXME(soqb): This is extremely messy. It needs major refactoring and cleanup.
-        // To be quite honest even I don't really have much of an idea of how all this works, but it seems to.
-        mod combinatorics {
-            pub fn choose(n: usize, r: usize) -> usize {
-                if r > n {
-                    0
-                } else {
-                    (1..=r).fold(1, |t, term| t * (n - term + 1) / term)
-                }
-            }
+        let interner = self.interner;
 
-            /// Computes the `i`th weak [k-composition] of `n`.
-            ///
-            /// This is a list of `k` non-negative integers, summing to `n`.
-            ///
-            /// The order of this function (as exposed by `i`) is not defined,
-            /// but is consistent within a single compilation.
-            ///
-            /// Complexity for random access of the returned iterator
-            /// scales better with larger `k` and is worst case `O(sqrt k)` (for `k` = 1).
-            ///
-            /// [k-composition]: https://en.wikipedia.org/wiki/Composition_%28combinatorics%29  
-            pub fn weak_composition(
-                i: usize,
-                n: usize,
-                k: usize,
-            ) -> impl Iterator<Item = usize> + Clone {
-                /// Iterates a strange sequence of numbers.
-                ///
-                /// The second number in the pair is the `i`th element in a sequence defined by `row`.
-                /// The sequence begins with a 0, then has 1 repeated `choose(1 + row, row)` times,
-                /// then 2 repeated `choose(2 + row, row)` times and so on.
-                ///
-                /// The first number is the number of times the result has already been repeated.
-                fn inverse_pascal_diagonal(row: usize, i: usize) -> (usize, usize) {
-                    if row == 1 {
-                        // we optimize this branches since it is `O(n)`
-                        // for the iterator below and we can do it in `O(1)`.
-                        return (0, i);
-                    }
-
-                    // for `row = 2`, this is 0,1,1,2,2,2,3,3,3,3,4...
-                    // fixme: find algorithm with better complexity than `n^(1/row)`..?
-                    (0..)
-                        .flat_map(move |r| {
-                            std::iter::repeat(r).take(choose(r + row, row)).enumerate()
-                        })
-                        .nth(i)
-                        .unwrap()
-                }
-
-                assert!(n != 0 && k != 0);
-
-                let mut quota = n;
-                let mut slots = k - 1;
-                let mut l = i;
-                std::iter::from_fn(move || {
-                    slots = slots.saturating_sub(1);
-                    let r;
-                    (l, r) = inverse_pascal_diagonal(slots, l);
-
-                    let component = quota - r;
-                    quota = r;
-
-                    Some(component)
-                })
-                .take(k)
-            }
-        }
-
-        let interner = self.interner();
-
-        debug_span!("relate_tuple_contents", ?variance, ?a, ?b);
-
-        #[derive(Clone, Debug)]
-        enum ManifElem<'a, I: Interner> {
-            Concrete(&'a Ty<I>),
-            Existential { repeat_len: usize },
-        }
-
-        // this function has *way* too many parameters.
-        fn fold_manifs<'a, 'b, I: Interner>(
-            // we reuse the same buffer for each manif since they're all the same length.
-            buf: &mut Vec<ManifElem<'a, I>>,
-            interner: I,
-            variance: Variance,
-            arity: TupleArity,
+        #[derive(Debug)]
+        struct State<'a, I: Interner> {
             tuple: &'a [TupleElem<I>],
-            target_len: usize,
-            mut consume: impl FnMut(&[ManifElem<'a, I>]) -> Fallible<()>,
-        ) -> Fallible<()> {
-            let unpack_req = target_len - arity.min_len();
+            head: Option<InferenceVar>,
+            tail: Option<InferenceVar>,
+            buf: Vec<TupleElem<I>>,
+            has_reversed: bool,
+        }
 
-            if unpack_req == 0 {
-                // we don't need to unpack anything, so we just push all the inline elements.
-                buf.clear();
-                buf.extend(tuple.iter().map(|elem| match elem.data(interner) {
-                    TupleElemData::Unpack(_) => ManifElem::Existential { repeat_len: 0 },
-                    TupleElemData::Inline(ty) => ManifElem::Concrete(ty),
-                }));
+        #[derive(Debug)]
+        enum Elem<'a, I: Interner> {
+            New(&'a TupleElemData<I>),
+            Inferrable(InferenceVar),
+            Done,
+        }
 
-                return consume(&buf);
-            }
-
-            let unpackable_cnt = arity.element_count() - arity.min_len();
-
-            if unpackable_cnt > 20 {
-                // too complex!
-                return Err(NoSolution);
-            }
-
-            let manif_cnt =
-                combinatorics::choose((unpackable_cnt + unpack_req).saturating_sub(1), unpack_req);
-            assert_ne!(manif_cnt, 0, "there should be at least one manif.");
-
-            for i in 0..manif_cnt {
-                buf.clear();
-
-                let mut composition =
-                    combinatorics::weak_composition(i, unpack_req, unpackable_cnt);
-
-                buf.clear();
-                for elem in tuple.iter() {
-                    match elem.data(interner) {
-                        TupleElemData::Unpack(_) => {
-                            let repeat_len = composition.next().unwrap();
-                            buf.push(ManifElem::Existential { repeat_len });
-                        }
-                        TupleElemData::Inline(ty) => {
-                            buf.push(ManifElem::Concrete(ty));
-                        }
-                    }
-                }
-
-                let r = consume(&buf);
-                debug!("manif comparison relation: {:?}", r);
-
-                match (variance, r) {
-                    // for checking type equality, we want *every* manif to be able to match,
-                    // otherwise they're not the same type.
-                    (Variance::Invariant, Ok(_)) => continue,
-                    (Variance::Invariant, Err(_)) => return Err(NoSolution),
-                    // however, for subtyping, a single overlap is enough to draw a conclusion.
-                    (Variance::Covariant | Variance::Contravariant, Ok(_)) => return Ok(()),
-                    (Variance::Covariant | Variance::Contravariant, Err(_)) => continue,
+        impl<'a, I: Interner> State<'a, I> {
+            fn new(tuple: &'a [TupleElem<I>]) -> Self {
+                Self {
+                    tuple,
+                    head: None,
+                    tail: None,
+                    buf: Vec::new(),
+                    has_reversed: false,
                 }
             }
 
-            match variance {
-                Variance::Invariant => Ok(()),
-                Variance::Contravariant | Variance::Covariant => Err(NoSolution),
+            fn peek(&mut self, interner: I) -> Elem<'_, I> {
+                let (a, b) = if !self.has_reversed {
+                    (self.head, self.tail)
+                } else {
+                    (self.tail, self.head)
+                };
+                a.map(Elem::Inferrable)
+                    .or_else(|| {
+                        let end = if !self.has_reversed {
+                            self.tuple.first()
+                        } else {
+                            self.tuple.last()
+                        };
+                        end.map(|elem| Elem::New(elem.data(interner)))
+                    })
+                    .or_else(|| b.map(Elem::Inferrable))
+                    .unwrap_or(Elem::Done)
             }
-        }
 
-        fn dbg_manif<'a, I: Interner>(
-            manif: &'a [ManifElem<'a, I>],
-            interner: I,
-        ) -> impl std::fmt::Debug + 'a {
-            struct ManifDebug<'a, I: Interner> {
-                manif: &'a [ManifElem<'a, I>],
-                interner: I,
-            }
-
-            impl<'a, I: Interner> std::fmt::Debug for ManifDebug<'a, I> {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    let interner = self.interner;
-                    write!(f, "(")?;
-
-                    for (i, el) in self.manif.iter().enumerate() {
-                        match el {
-                            ManifElem::Concrete(ty) => {
-                                write!(f, "{:?}", ty.kind(interner).debug(interner))?
-                            }
-                            ManifElem::Existential { repeat_len: 0 } => continue,
-                            ManifElem::Existential { repeat_len } => {
-                                write!(f, "{}_", "_, ".repeat(repeat_len - 1))?
-                            }
-                        }
-
-                        if i < self.manif.len() - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-
-                    write!(f, ")")
+            fn advance(&mut self) {
+                if self.has_reversed {
+                    self.tuple = &self.tuple[..self.tuple.len() - 1];
+                } else {
+                    self.tuple = &self.tuple[1..];
                 }
             }
 
-            ManifDebug { manif, interner }
-        }
+            fn finish_and_reverse(&mut self) -> (bool, Vec<TupleElem<I>>) {
+                let elems = take(&mut self.buf);
+                if self.has_reversed {
+                    return (true, elems);
+                }
 
-        let len_range = match arity_a.intersection(arity_b) {
-            Some(TupleArity::Exact(n)) => n..=n,
-            Some(TupleArity::Inexact { min_len, .. }) => {
-                // FIXME(soqb): These docs are hopelessly vague.
-                //
-                // We only need to check these ranges to know how types are related.
-                // there's a good *intuition* for why this is when thinking about how manifs
-                // "fall over" eachother, but we haven't found a proof.
-                //
-                // Beyond this upper bound,
-                // there's no index that a `ManifElem::Existential` could be inserted
-                // which where a `ManifElem::Existential` wouldn't be in the other manif,
-                // resulting in a redundant check.
-                min_len..=arity_a.min_len() + arity_b.min_len()
+                self.has_reversed ^= true;
+                self.head = None;
+                self.tail = None;
+
+                (false, elems)
             }
-            None => unreachable!("tried to relate two non-overlapping tuples"),
-        };
 
-        let (mut buf_a, mut buf_b) = (
-            Vec::with_capacity(arity_a.element_count()),
-            Vec::with_capacity(arity_b.element_count()),
-        );
-        for len in len_range {
-            fold_manifs(&mut buf_a, interner, variance, arity_a, a, len, |manif_a| {
-                fold_manifs(&mut buf_b, interner, variance, arity_b, b, len, |manif_b| {
-                    debug_span!(
-                        "comparing_manifs",
-                        "{:?}; {:?}\na = {:?}\nb = {:?}",
-                        manif_a,
-                        manif_b,
-                        dbg_manif(manif_a, interner),
-                        dbg_manif(manif_b, interner)
-                    );
+            fn everything(&mut self, interner: I) -> Ty<I> {
+                let mut extra_things = 0;
+                let head = self
+                    .head
+                    .inspect(|_| extra_things += 1)
+                    .map(|end| Self::fixup(end, interner))
+                    .into_iter();
+                let tail = self
+                    .tail
+                    .inspect(|_| extra_things += 1)
+                    .map(|end| Self::fixup(end, interner))
+                    .into_iter();
 
-                    // FIXME(soqb): This is where the disgusting spaghetti really begins.
-                    enum ManifUnpack<'a, I: Interner> {
-                        Concrete(&'a Ty<I>),
-                        SingalUnpackedStart { parent_idx: usize },
-                        ContinueUnpacking,
+                let mut unpacked = 0;
+                let mut inline = 0;
+                for el in self.tuple {
+                    match el.data(interner) {
+                        TupleElemData::Unpack(_) => unpacked += 1,
+                        TupleElemData::Inline(_) => inline += 1,
                     }
+                }
 
-                    fn close<'a, 'b, I: Interner>(
-                        manif: &'b [ManifElem<'a, I>],
-                    ) -> impl FnMut() -> Option<ManifUnpack<'a, I>> + 'b {
-                        let mut repeats = 0;
-                        let mut iter = manif.iter().enumerate();
-                        move || {
-                            if repeats > 0 {
-                                repeats -= 1;
-                                return Some(ManifUnpack::ContinueUnpacking);
-                            }
-
-                            match iter.next()? {
-                                (parent_idx, &ManifElem::Existential { repeat_len }) => {
-                                    repeats = repeat_len;
-                                    Some(ManifUnpack::SingalUnpackedStart { parent_idx })
-                                }
-                                (_, ManifElem::Concrete(ty)) => Some(ManifUnpack::Concrete(ty)),
-                            }
-                        }
+                let arity = if extra_things + unpacked == 0 {
+                    TupleArity::Exact(inline)
+                } else {
+                    TupleArity::Inexact {
+                        min_len: inline - extra_things,
+                        element_count: unpacked + inline + extra_things,
                     }
+                };
 
-                    /// I am insane. I am insane. I am insane.
-                    struct RelationStation<'a, I: Interner> {
-                        finished: bool,
-                        element_idx: usize,
-                        elements: Vec<Cow<'a, Ty<I>>>,
-                        manif: &'a [ManifElem<'a, I>],
-                        tuple: &'a [TupleElem<I>],
+                debug!("tuple is {:?}", self.tuple);
+
+                let tup = TupleContents::from_iter(
+                    interner,
+                    head.chain(self.tuple.iter().cloned()).chain(tail),
+                );
+
+                self.tuple = &[];
+
+                Self::flatten_tuple(interner, tup)
+            }
+
+            fn is_empty(&self) -> bool {
+                self.tuple.is_empty()
+            }
+
+            fn set_end(&mut self, end: InferenceVar) {
+                if self.has_reversed {
+                    self.tail = Some(end);
+                } else {
+                    self.head = Some(end);
+                }
+            }
+
+            fn fixup(var: InferenceVar, interner: I) -> TupleElem<I> {
+                TupleElemData::Unpack(
+                    TyKind::InferenceVar(var, TyVariableKind::General).intern(interner),
+                )
+                .intern(interner)
+            }
+
+            // somehow, this seems to be the only place we should ensure tuples are simplified.
+            // we don't do this in other places (like WF-check) because (..T) and T are
+            // sometimes semantically distinct.
+            /// Flattens the structure of a tuple.
+            ///
+            /// This transformation is the following:
+            /// 1. (..T) -> T;
+            fn flatten_tuple(interner: I, tuple_contents: TupleContents<I>) -> Ty<I> {
+                let slice = tuple_contents.as_slice(interner);
+                if let (1, Some(elem)) = (slice.len(), slice.first()) {
+                    if let TupleElemData::Unpack(ty) = elem.data(interner) {
+                        return ty.clone();
                     }
-
-                    impl<'a, I: Interner> RelationStation<'a, I> {
-                        fn new(tuple: &'a [TupleElem<I>], manif: &'a [ManifElem<'a, I>]) -> Self {
-                            Self {
-                                finished: true,
-                                element_idx: 0,
-                                manif,
-                                tuple,
-                                elements: Vec::with_capacity(manif.len()),
-                            }
-                        }
-
-                        fn update(
-                            &mut self,
-                            interner: I,
-                            elem: Option<&ManifUnpack<'a, I>>,
-                        ) -> Option<(Ty<I>, &'a Ty<I>)> {
-                            if self.finished || matches!(elem, Some(ManifUnpack::ContinueUnpacking))
-                            {
-                                return None;
-                            }
-
-                            self.finished = true;
-                            let tuple = TyKind::new_tuple_exact(interner, self.elements.drain(..));
-                            let borrowed =
-                                self.tuple[self.element_idx].ty_unpacked(interner).unwrap();
-                            debug_span!(
-                                "forming_tuple_a",
-                                "idx = {}; {:?} against {:?}",
-                                self.element_idx,
-                                tuple.kind(interner).debug(interner),
-                                borrowed.kind(interner).debug(interner),
-                            );
-
-                            Some((tuple, borrowed))
-                            // self
-                            //     .relate_ty_ty(
-                            //         variance.invert(),
-                            //         &tuple,
-                            //         &self.manif[self.element_idx]
-                            //             .ty_unpacked(interner)
-                            //             .unwrap(),
-                            //     )
-                            //     .is_ok();
-
-                            // self = RelationStation::default();
-                        }
+                }
+                let mut inline = 0;
+                let mut unpacked = 0;
+                for el in slice {
+                    match el.data(interner) {
+                        TupleElemData::Unpack(_) => unpacked += 1,
+                        TupleElemData::Inline(_) => inline += 1,
                     }
-
-                    let snapshot = self.table.snapshot();
-
-                    let mut close_a = close(manif_a);
-                    let mut close_b = close(manif_b);
-                    let mut station_a = RelationStation::new(a, manif_a);
-                    let mut station_b = RelationStation::new(b, manif_b);
-                    let mut elem_a = close_a();
-                    let mut elem_b = close_b();
-                    loop {
-                        if let Some((tuple, borrowed_ty)) =
-                            station_a.update(interner, elem_a.as_ref())
-                        {
-                            // ignoring the result here feels wrong (unsound?).
-                            // we only really care about the effects on inference.
-                            let _ = self.relate_ty_ty(variance.invert(), &tuple, borrowed_ty);
-                        }
-                        if let Some((tuple, borrowed_ty)) =
-                            station_b.update(interner, elem_b.as_ref())
-                        {
-                            // ignoring the result here feels wrong (unsound?).
-                            // we only really care about the effects on inference.
-                            let _ = self.relate_ty_ty(variance, &tuple, borrowed_ty);
-                        }
-
-                        if let Some(ManifUnpack::SingalUnpackedStart { parent_idx }) = elem_a {
-                            station_a.finished = false;
-                            station_a.element_idx = parent_idx;
-                            elem_a = close_a();
-                            continue;
-                        }
-
-                        if let Some(ManifUnpack::SingalUnpackedStart { parent_idx }) = elem_b {
-                            if !station_a.finished {
-                                let unpacking_atom = self
-                                    .table
-                                    .new_variable(self.table.max_universe)
-                                    .to_ty(interner);
-                                station_b.elements.push(unpacking_atom);
-                            }
-
-                            station_b.finished = false;
-                            station_b.element_idx = parent_idx;
-                            elem_b = close_b();
-                            continue;
-                        }
-
-                        match (elem_a, elem_b) {
-                            (None, None) => break,
-                            (None, _) | (_, None) => panic!("manif length mismatch!"),
-                            (Some(ManifUnpack::Concrete(a)), Some(ManifUnpack::Concrete(b))) => {
-                                match self.relate_ty_ty(variance, a, b) {
-                                    Ok(_) => (),
-                                    Err(NoSolution) => {
-                                        self.table.rollback_to(snapshot);
-                                        return Err(NoSolution);
-                                    }
-                                }
-                            }
-                            (
-                                Some(ManifUnpack::ContinueUnpacking),
-                                Some(ManifUnpack::ContinueUnpacking),
-                            ) => (),
-                            (
-                                Some(ManifUnpack::ContinueUnpacking),
-                                Some(ManifUnpack::Concrete(ty)),
-                            ) => {
-                                station_a.elements.push(ty);
-                            }
-                            (
-                                Some(ManifUnpack::Concrete(ty)),
-                                Some(ManifUnpack::ContinueUnpacking),
-                            ) => {
-                                station_b.elements.push(ty);
-                            }
-                            (Some(ManifUnpack::SingalUnpackedStart { .. }), _)
-                            | (_, Some(ManifUnpack::SingalUnpackedStart { .. })) => {
-                                unreachable!("handled above")
-                            }
-                        }
-
-                        elem_a = close_a();
-                        elem_b = close_b();
+                }
+                let arity = if unpacked == 0 {
+                    TupleArity::Exact(inline)
+                } else {
+                    TupleArity::Inexact {
+                        min_len: inline,
+                        element_count: inline + unpacked,
                     }
+                };
 
-                    // fixme: we're wasting loads of work here.
-                    if variance == Variance::Invariant {
-                        self.table.rollback_to(snapshot);
-                    }
+                TyKind::Tuple(arity, tuple_contents).intern(interner)
 
-                    Ok(())
-                })
-            })?;
+                // let mut unpacking_i = 0;
+                // let mut unpacking: Option<TupleContents<I>> = None;
+                // let mut primary = slice.iter().enumerate();
+                // enum WhatTheSigma<I: Interner> {
+                //     What,
+                //     TheSigma(TupleElem<I>),
+                // }
+
+                // let mut inline = 0;
+                // let mut unpacked = 0;
+                // let iter = std::iter::from_fn(|| {
+                //     if let Some(unpacking) = unpacking.as_mut() {
+                //         if let Some(next) = unpacking.as_slice(interner).get(unpacking_i) {
+                //             unpacking_i += 1;
+                //             match next.data(interner) {
+                //                 TupleElemData::Unpack(_) => unpacked += 1,
+                //                 TupleElemData::Inline(_) => inline += 1,
+                //             }
+                //             return Some(WhatTheSigma::TheSigma(next.clone()));
+                //         }
+                //     }
+
+                //     let Some((i, tuple_elem)) = primary.next() else {
+                //         return None;
+                //     };
+
+                //     let ty = tuple_elem.ty_any(interner);
+                //     let elem = match tuple_elem.data(interner) {
+                //         TupleElemData::Unpack(_) => {
+                //             if let TyKind::Tuple(_, contents) = ty.kind(interner) {
+                //                 unpacking = Some(contents.clone());
+                //                 unpacking_i = 0;
+                //                 return Some(WhatTheSigma::What);
+                //             } else {
+                //                 unpacked += 1;
+                //                 TupleElemData::Unpack(ty.clone())
+                //             }
+                //         }
+                //         TupleElemData::Inline(_) => {
+                //             inline += 1;
+                //             TupleElemData::Inline(ty.clone())
+                //         }
+                //     };
+
+                //     Some(WhatTheSigma::TheSigma(elem.intern(interner)))
+                // })
+                // .flat_map(|erm| match erm {
+                //     WhatTheSigma::What => None,
+                //     WhatTheSigma::TheSigma(t) => Some(t),
+                // });
+
+                // let contents = TupleContents::from_iter(interner, iter);
+                // let arity = if unpacked == 0 {
+                //     TupleArity::Exact(inline)
+                // } else {
+                //     TupleArity::Inexact {
+                //         min_len: inline,
+                //         element_count: inline + unpacked,
+                //     }
+                // };
+
+                // TyKind::Tuple(arity, contents).intern(interner)
+            }
         }
 
-        Ok(())
+        let mut this = State::new(a);
+        let mut other = State::new(b);
+
+        loop {
+            debug!(
+                "unification loop: {:?}; {:?}",
+                this.peek(interner),
+                other.peek(interner)
+            );
+            match (this.peek(interner), other.peek(interner)) {
+                (Elem::Inferrable(_), Elem::New(d @ TupleElemData::Inline(_))) => {
+                    debug!("pushing {d:?} onto the buffer.");
+                    this.buf.push(d.clone().intern(interner));
+                    other.advance();
+                }
+                (Elem::Inferrable(infer), Elem::New(TupleElemData::Unpack(_))) => {
+                    // comparing two unpacked elements. no more progress can be made in this direction.
+                    let (really_finished, elems) = this.finish_and_reverse();
+                    other.finish_and_reverse();
+
+                    debug!("reversed direction; really finished ?= {really_finished}");
+
+                    let var = if elems.is_empty() {
+                        // if we don't conclude anything about the unpacked elements, just reuse the same inference variable.
+                        infer
+                    } else {
+                        let ui = self.table.new_universe();
+                        let var = self.table.new_variable(ui).into();
+                        let new_var_ty =
+                            TyKind::InferenceVar(var, TyVariableKind::General).intern(interner);
+
+                        let arity = TupleArity::Inexact {
+                            min_len: elems.len(),
+                            element_count: elems.len() + 1,
+                        };
+
+                        let contents = if !this.has_reversed {
+                            TupleContents::from_iter(
+                                interner,
+                                elems.into_iter().chain(std::iter::once(
+                                    TupleElemData::Unpack(new_var_ty).intern(interner),
+                                )),
+                            )
+                        } else {
+                            TupleContents::from_iter(
+                                interner,
+                                std::iter::once(TupleElemData::Unpack(new_var_ty).intern(interner))
+                                    .chain(elems),
+                            )
+                        };
+                        let tuple = TyKind::Tuple(arity, contents).intern(interner);
+
+                        self.relate_var_ty(variance, infer, TyVariableKind::General, &tuple)?;
+
+                        var
+                    };
+
+                    if really_finished {
+                        this.tail = Some(var);
+                        break;
+                    } else {
+                        this.head = Some(var);
+                    }
+                }
+                (Elem::Inferrable(infer), Elem::Done) => {
+                    let (_, elems) = this.finish_and_reverse();
+                    let tuple = TyKind::Tuple(
+                        TupleArity::Exact(elems.len()),
+                        TupleContents::from_iter(interner, &elems),
+                    )
+                    .intern(interner);
+                    self.relate_var_ty(variance, infer, TyVariableKind::General, &tuple)?;
+                    break;
+                }
+                (Elem::New(TupleElemData::Inline(a)), Elem::New(TupleElemData::Inline(b))) => {
+                    self.relate_ty_ty(variance, a, b)?;
+                    this.advance();
+                    other.advance();
+                }
+                (_, Elem::Inferrable(_)) => {
+                    debug!("flipped vertically.");
+                    swap(&mut this, &mut other);
+                    variance = variance.invert();
+                }
+                // fixme: the rest of these branches are still quite messy.
+                (Elem::New(TupleElemData::Unpack(a)), Elem::New(TupleElemData::Unpack(b))) => {
+                    if let &TyKind::InferenceVar(var, _) = a.kind(interner) {
+                        this.set_end(var);
+                        this.advance();
+                    } else if let &TyKind::InferenceVar(var, _) = b.kind(interner) {
+                        other.set_end(var);
+                        other.advance();
+
+                        debug!("flipped vertically.");
+                        swap(&mut this, &mut other);
+                        variance = variance.invert();
+                    } else {
+                        let (really_finished, _) = this.finish_and_reverse();
+                        other.finish_and_reverse();
+                        if really_finished {
+                            break;
+                        }
+                    }
+                }
+                (Elem::New(TupleElemData::Unpack(a)), _) => {
+                    if let &TyKind::InferenceVar(var, _) = a.kind(interner) {
+                        this.set_end(var);
+                        this.advance();
+
+                        assert!(other.buf.is_empty());
+                    } else {
+                        let (really_finished, _) = this.finish_and_reverse();
+                        other.finish_and_reverse();
+                        if really_finished {
+                            break;
+                        }
+                    }
+                }
+                (_, Elem::New(TupleElemData::Unpack(b))) => {
+                    if let &TyKind::InferenceVar(var, _) = b.kind(interner) {
+                        other.set_end(var);
+                        other.advance();
+
+                        assert!(this.buf.is_empty());
+
+                        debug!("flipped vertically.");
+                        swap(&mut this, &mut other);
+                        variance = variance.invert();
+                    } else {
+                        let (really_finished, _) = this.finish_and_reverse();
+                        other.finish_and_reverse();
+                        if really_finished {
+                            break;
+                        }
+                    }
+                }
+                (Elem::Done, Elem::Done) => break,
+                _ => return Err(NoSolution),
+            }
+        }
+
+        debug!("loop finished.\nthis = {this:#?};\nother = {other:#?};");
+
+        if let Some(var) = this
+            .head
+            .and_then(|h| this.tail.is_some_and(|t| h == t).then_some(h))
+        {
+            let ty = other.everything(interner);
+            debug!("head and tail of this matched to be {var:?}, relating to {ty:?}");
+            self.relate_var_ty(variance, var, TyVariableKind::General, &ty)?;
+        }
+
+        if let Some(var) = other
+            .head
+            .and_then(|h| other.tail.is_some_and(|t| h == t).then_some(h))
+        {
+            let ty = this.everything(interner);
+            debug!("head and tail of other matched to be {var:?}, relating to {ty:?}");
+            self.relate_var_ty(variance.invert(), var, TyVariableKind::General, &ty)?;
+        }
+
+        if this.is_empty() && other.is_empty() {
+            Ok(())
+        } else {
+            Err(NoSolution)
+        }
+
+        // match (this.remaining_len(), other.remaining_len()) {
+        //     (0, 0) => Ok(()),
+        //     (1, 1) => {
+        //         match this.peek(interner) {
+        //             Elem::Inferrable(infer) => {
+        //                 return self.relate_var_ty(variance, infer, TyVariableKind::General, &ty);
+        //             }
+        //             _ => (),
+        //         }
+
+        //         match other.peek(interner) {
+        //             Elem::Inferrable(infer) => {
+        //                 let ty = this.everything(interner);
+        //                 self.relate_var_ty(variance.invert(), infer, TyVariableKind::General, &ty)
+        //             }
+        //             _ => Err(NoSolution),
+        //         }
+        //     }
+        //     (1, _) => match this.peek(interner) {
+        //         Elem::Inferrable(infer) => {
+        //             let ty = other.everything(interner);
+        //             self.relate_var_ty(variance, infer, TyVariableKind::General, &ty)
+        //         }
+        //         _ => Err(NoSolution),
+        //     },
+        //     (_, 1) => match other.peek(interner) {
+        //         Elem::Inferrable(infer) => {
+        //             let ty = this.everything(interner);
+        //             self.relate_var_ty(variance.invert(), infer, TyVariableKind::General, &ty)
+        //         }
+        //         _ => Err(NoSolution),
+        //     },
+        //     _ => Err(NoSolution),
+        // }
+
+        // loop {
+        //     let next = head_a
+        //         .as_ref()
+        //         .or_else(|| a.get(core_a.start))
+        //         .map(|elem| elem.data(interner));
+
+        //     match next {
+        //         Some(TupleElemData::Inline(a)) => {
+        //             let next_other = head_b
+        //                 .as_ref()
+        //                 .or_else(|| b.get(core_b.start))
+        //                 .map(|elem| elem.data(interner));
+
+        //             if let Some(TupleElemData::Inline(b)) = next_other {
+        //                 self.relate_ty_ty(variance, a, b)?;
+        //                 if next.take().is_none() {
+        //                     core_a.start += 1;
+        //                 }
+        //                 if next_other.take().is_none() {
+        //                     core_b.start += 1;
+        //                 }
+        //                 continue;
+        //             }
+        //         }
+        //         Some(TupleElemData::Unpack(a)) => todo!(),
+        //         None => todo!(),
+        //     }
+        // }
+
+        // loop {
+        //     // right-forward loop
+        //     loop {
+        //         // left-forward loop
+        //         let next_a = head_a.as_ref().or_else(|| a.get(core_a.start));
+        //         let next_b = head_b.as_ref().or_else(|| b.get(core_b.start));
+
+        //         match (
+        //             next_a.map(|elem| elem.data(interner)),
+        //             next_b.map(|elem| elem.data(interner)),
+        //         ) {
+        //             (None, None) => todo!(),
+        //             (None, _) | (_, None) => todo!(),
+        //             (Some(TupleElemData::Inline(a)), Some(TupleElemData::Inline(b))) => {
+        //                 self.relate_ty_ty(variance, a, b)?
+        //             }
+        //             (Some(TupleElemData::Unpack(a)), Some(TupleElemData::Inline(b))) => {
+        // if let TyKind::InferenceVar(var, var_kind) = a.kind(interner) {
+        //                     let ui = self.table.new_universe();
+        //                     let infer = self.table.new_variable(ui).to_ty(interner);
+        //                     let tuple = TyKind::Tuple(
+        //                         TupleArity::Inexact {
+        //                             min_len: 1,
+        //                             element_count: 2,
+        //                         },
+        //                         TupleContents::from_iter(interner, [b.clone(), infer]),
+        //                     );
+        //                     self.relate_var_ty(variance, var, var_kind, &tuple)?
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
     }
 
     #[instrument(level = "debug", skip(self))]

@@ -1,0 +1,12 @@
+#[lang(tuple_trait)]
+trait Tuple { }
+
+#[lang(sized)]
+trait Sized { }
+
+trait AllTuples { }
+
+impl AllTuples for () { }
+
+// impl<T, R> AllTuples for (T, T, ..R) where T: Sized, R: Sized, R: Tuple { }
+impl<T, R> AllTuples for (T, ..R) where T: Sized, R: Sized, R: Tuple { }

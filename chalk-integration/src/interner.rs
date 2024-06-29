@@ -208,6 +208,20 @@ impl Interner for ChalkIr {
         tls::with_current_program(|prog| Some(prog?.debug_substitution(substitution, fmt)))
     }
 
+    fn debug_tuple_contents(
+        tuple_contents: &chalk_ir::TupleContents<Self>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Option<fmt::Result> {
+        tls::with_current_program(|prog| Some(prog?.debug_tuple_contents(tuple_contents, fmt)))
+    }
+
+    fn debug_tuple_elem(
+        tuple_elem: &TupleElem<Self>,
+        fmt: &mut fmt::Formatter<'_>,
+    ) -> Option<fmt::Result> {
+        tls::with_current_program(|prog| Some(prog?.debug_tuple_elem(tuple_elem, fmt)))
+    }
+
     fn debug_separator_trait_ref(
         separator_trait_ref: &SeparatorTraitRef<'_, ChalkIr>,
         fmt: &mut fmt::Formatter<'_>,

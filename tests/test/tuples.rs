@@ -440,8 +440,9 @@ fn variadic_tuples_non_overlap() {
             trait AllTuples { }
 
             impl AllTuples for () { }
-
             impl<T, R> AllTuples for (T, ..R) where R: Tuple { }
+            // impl<T> AllTuples for (T,) { }
+            // impl<T, U, R> AllTuples for (T, U, ..R) where R: Tuple { }
         }
 
         goal {
@@ -450,16 +451,28 @@ fn variadic_tuples_non_overlap() {
             expect![["Unique"]]
         }
 
-        // goal {
-        //     forall<T> { if (T: Sized) { (T,): AllTuples } }
-        // } yields {
-        //     expect![["Unique"]]
-        // }
+        goal {
+            forall<T> { if (T: Sized) { (T,): AllTuples } }
+        } yields {
+            expect![["Unique"]]
+        }
 
-        // goal {
-        //     forall<T, R> { if (T: Sized; R: Tuple) { (T, ..R): AllTuples } }
-        // } yields {
-        //     expect![["Unique"]]
-        // }
+        goal {
+            forall<T> { if (T: Sized; T: Tuple) { (..T): AllTuples } }
+        } yields {
+            expect![["Unique"]]
+        }
+
+        goal {
+            forall<T, R> { if (T: Sized; R: Sized; R: Tuple) { (T, ..R): AllTuples } }
+        } yields {
+            expect![["Unique"]]
+        }
+
+        goal {
+            forall<T, U, R> { if (T: Sized; U: Sized; R: Sized; R: Tuple) { (T, ..R, U): AllTuples } }
+        } yields {
+            expect![["Unique"]]
+        }
     }
 }

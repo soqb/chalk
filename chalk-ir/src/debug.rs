@@ -231,12 +231,12 @@ impl<I: Interner> Debug for TyKind<I> {
             }
             TyKind::Scalar(scalar) => write!(fmt, "{:?}", scalar),
             TyKind::Str => write!(fmt, "Str"),
-            TyKind::Tuple(arity, substitution) => {
+            TyKind::Tuple(arity, contents) => {
                 if arity.is_empty() {
                     // more friendly unit tuple debug:
                     write!(fmt, "()")
                 } else {
-                    write!(fmt, "{:?}<{:?}>", arity, substitution)
+                    write!(fmt, "{:?}{:?}", arity, contents)
                 }
             }
             TyKind::OpaqueType(opaque_ty, substitution) => {
@@ -535,7 +535,12 @@ impl<'a, I: Interner> Debug for TyKindDebug<'a, I> {
             TyKind::Scalar(scalar) => write!(fmt, "{:?}", scalar),
             TyKind::Str => write!(fmt, "Str"),
             TyKind::Tuple(arity, contents) => {
-                write!(fmt, "{:?}{:?}", arity, contents.debug(interner))
+                if arity.is_empty() {
+                    // more friendly unit tuple debug:
+                    write!(fmt, "()")
+                } else {
+                    write!(fmt, "{:?}{:?}", arity, contents)
+                }
             }
             TyKind::OpaqueType(opaque_ty, substitution) => write!(
                 fmt,
@@ -640,24 +645,16 @@ impl<'a, I: Interner> Debug for TupleContentsDebug<'a, I> {
             interner,
         } = self;
 
-        write!(fmt, "(")?;
+        write!(fmt, "<")?;
 
-        for (r_index, (l_index, value)) in tuple_contents
-            .iter(*interner)
-            .enumerate()
-            .rev()
-            .enumerate()
-            .rev()
-        {
+        for (r_index, value) in tuple_contents.iter(*interner).rev().enumerate().rev() {
             write!(fmt, "{:?}", value)?;
             if r_index != 0 {
                 write!(fmt, ", ")?;
-            } else if l_index == 0 {
-                write!(fmt, ",")?;
             }
         }
 
-        write!(fmt, ")")?;
+        write!(fmt, ">")?;
 
         Ok(())
     }
